@@ -14,18 +14,20 @@
 | `/webtoggle on` | 开 |
 | `/webtoggle status` | 只看当前状态，不改 |
 | `/webtoggle config` | 看面板配置与两份保留名单 |
-| `/webtoggle surface <plugin\|settings\|composer> on\|off` | 开关某处面板 |
-| `/webtoggle allow add\|remove <tool> [--global]` | 增删保留工具（默认本会话） |
-| `/webtoggle allow list\|clear [--global]` | 列出 / 清空 |
+| `/webtoggle tools` | 列出内核当前全部工具 + 哪些在断网时保留 |
+| `/webtoggle surface <settings\|composer> on\|off` | 开关某处面板（`plugin` 固定显示，见下） |
+| `/webtoggle keep <tool> on\|off [--global]` | 让某个工具断网时保留 / 隐藏（默认本会话） |
+| `/webtoggle keep reset [--global]` | 这一层名单交还上一层 |
+| `/webtoggle allow add\|remove <tool> [--global]` | `keep` 的旧写法 |
 
-命令结果末尾带一个机器可读标记（`[web:on]` / `[web:off]`），按钮用它同步真实状态；后面还跟一段 `[web-state]{...}`，面板用它画配置（开关状态、三个入口、两份白名单、配置是否可写）。
+命令结果末尾带机器可读标记：`[web:on]` / `[web:off]` 供按钮同步真实状态，`[web-state]{...}` 供面板画配置（开关、三个入口、两份名单、能否写配置）。`tools` 与 `keep`/`surface` 的回执里还多一段 `[web-tools]{...}`（工具目录，含每项的 `kept`/`builtIn`），面板据此一次往返就把开关画对，不必再问一遍。
 
 ## 行为
 
 - 关闭后，本会话的 Agent 上下文被 `tools.restrict({ allow: [...本地工具 + ops_bash] })` 加上遮罩：下一次请求的工具声明里只剩白名单里的名字，其余（网页搜索、浏览器、MCP、视频/生图、子代理、插件管理、定时任务）一律消失；模型硬调用只会得到 unknown tool。
 - `ops_bash` 属于双用途工具，因此不隐藏而是加一道 `tools.guard()`：命令文本命中联网特征（`curl`/`wget`/`ssh`/`git clone`/`pnpm add`/`pip install`/`http(s)://`/UNC 共享/导入 `http`,`net`,`tls` 模块等）就在执行前被拒绝，本地命令照常跑。guard 是与 restrict 同作用域的，恢复时一并撤销。
 - 用**白名单**而不是 deny 两三个名字是有意的：`ops_bash` 可以 `curl`、浏览器工具能开页面、MCP 能转发请求，deny 少数几个永远漏。白名单默认关门，将来新插件加的工具也进不来，除非显式加名字。
-- 白名单只取"工具目录里真实存在的名字"（`tools.view().restrictableNames`），所以某个插件没装时不会因为 `restrict()` 报 unknown tool 而整体失败。
+- 名单里的名字只留内核肯接受的（见下「工具目录怎么来的」），插件没装时不会因为 `restrict()` 报 unknown tool 而整体失败。
 - 恢复时调用当时存下的那个 disposer，遮罩被精确撤销，工具列表原样回来。
 - 状态按**会话**记录，互不影响：关掉 A 会话不会影响 B 会话，也不影响其他会话的本地工作。
 - 工具列表变了会重建请求序列（`agent/pre-step` → `startsRequestSeries`），避免新声明被上游当成「延迟追加」。
@@ -40,11 +42,13 @@
 | `settings.section` | `web-toggle` | 设置页侧边栏的全局面板 |
 | `plugins.detail.section` | `web-toggle` | 插件详情页的全局面板（只认本包） |
 
-- 三个槽位**总是**注册，配置里关掉时组件直接 `return null`：这样改配置不需要重注册槽位，也不会在导航里留下空条目。
+- 入口开关是**真卸载**：关掉时把 `ctx.slots.register` 的 disposer 连同它的 `ctx.effect` 一起撤销，导航项与图标一起消失；重新打开时再注册回来。详情页那一处**永不卸载**——它是把另外两个入口重新打开的保底，命令层面 `surface plugin off` 只回一句说明。
+- 三个面板里都有「工具」区：列出全部工具、每行一个开关，点一下发 `keep <name> on|off[ --global]`；筛选框只做本地过滤。
 - 设置页与详情页拿不到 sessionId（owner props 只有 `close` / `subject`），所以它们执行命令时用「最后一个画过的会话」：模块级 `lastSessionId` → localStorage `dsh-web-toggle:last-session` → 客户端已知的第一个会话。命中不了就如实提示「先打开任意一个任务」。
 - 配置写入只走 `configEditor.edit(entry, current => …)`：拿不到编辑器时**如实报错**（`没有配置文件可写`、`writable: false`），绝不假装保存。
 - 五个配置字段都是 `.volatile()`：改值原地生效，不重启插件。写入用 `saves` promise 串行化，避免两次点击互相覆盖。
-- 白名单 = `LOCAL_TOOLS ∪ GUARDED_TOOLS ∪ globalTools ∪ sessionTools[sessionId]`，与 `tools.view().restrictableNames` 求交后交给 `restrict({ allow })`。`allow add` 先用 `knownNames` 校验：不存在的名字直接拒绝。
+- 名单是**分层且完整**的：`sessionTools[sid]`（非空）→ `globalTools`（非空）→ 内置默认（`LOCAL_TOOLS ∪ GUARDED_TOOLS`）。写入的是整份名单，所以「关掉一个工具」＝把它从这一层删掉，`keep reset` ＝交还上一层。
+- 工具目录怎么来的：`restrict()` 的校验用的是 `this.view(scopeOf(this.ctx)).restrictableNames`，而 `scopeOf` 用的 `kScope` 符号没有导出给插件，`view()` 不带参数又只是全局视图（看不到 profile 围绕 Agent 组合出来的名字）。所以拿到目录的办法是**让 restrict 自己报**：先 `restrict({ deny: ['__webtoggle_probe__'] })`，成功说明探针名居然存在（立刻 dispose），失败就从 `names unknown global tool "…"; known global tools: …` 的尾部解析出该作用域接受的完整名单。真正下发时若仍被拒（名单里混进了不存在的名字），再来一次 `openRestriction()`：解析内核名单、取交集重试。
 - 已经在断网状态时改白名单（`retune()`）：先按新名单建好新的 restrict + guard，再撤销旧的，中间不会出现「变宽」的空档；正在执行的轮次跳过并在回执里写 `跳过 N（正在执行）`，等下一轮切开关时自然带上新名单。
 
 ## 性能
@@ -65,7 +69,7 @@
 
 ## 相关实现
 
-- `index.js`：`/webtoggle` 命令（含 `config` / `surface` / `allow`）、`Config` 五个 volatile 字段、`tools.restrict()` 遮罩与 `tools.guard()` 命令过滤的 disposer 管理、`retune()` 换名单、请求序列重建、会话销毁清理。
+- `index.js`：`/webtoggle` 命令（含 `config` / `surface` / `tools` / `keep` / `allow`）、`Config` 五个 volatile 字段、`restrictableOf()` 探针式目录、`openRestriction()` 收窄重试、`tools.restrict()` 遮罩与 `tools.guard()` 命令过滤的 disposer 管理、`retune()` 换名单、请求序列重建、会话销毁清理。
 - `client.js`：三个槽位组件（输入框开关 + 小箭头浮层、设置页、插件详情页）、共用面板 `PanelView`、按会话铭记的显示状态、`commands.execute` 调用。
 
 ## 拒绝文案为什么写成指令

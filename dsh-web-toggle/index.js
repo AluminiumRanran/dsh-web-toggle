@@ -44,7 +44,7 @@ const COMMAND = 'webtoggle'
  * built-in local names — per deployment, and per Session.
  */
 export const Config = z.object({
-  pluginPage: z.boolean().default(true).volatile().description('Show the configuration panel on this bundle\'s detail page.'),
+  pluginPage: z.boolean().default(true).volatile().description('Reserved: the bundle detail page is always shown, because it is the entry that restores the other panels.'),
   settingsSection: z.boolean().default(true).volatile().description('Add a "Web switch" section to the settings sidebar.'),
   composerPanel: z.boolean().default(true).volatile().description('Show the small arrow next to the composer toggle that opens this Session\'s panel.'),
   globalTools: z.array(z.string()).default([]).volatile().description('Extra tool names every Session keeps while the network is off.'),
@@ -123,6 +123,13 @@ const OFFLINE_NOTICE =
   'switch back on for a while. Do the same if you suspect a false positive.'
 
 const GUARDED_TOOLS = ['ops_bash']
+
+/**
+ * A name no deployment registers. `restrict()` validates before it applies anything, so
+ * handing it this name is a free catalogue read: the error names every tool that scope
+ * would accept, and nothing is left armed.
+ */
+const PROBE_NAME = '__webtoggle_probe__'
 
 /**
  * Words that mean "this command wants the network": binaries, schemes, package fetches,
@@ -376,10 +383,14 @@ export function apply(ctx, config) {
     return list.filter((entry) => typeof entry === 'string' && entry !== '')
   }
 
-  /** The three surface switches, as the browser half reads them. */
+  /**
+   * The three surface switches, as the browser half reads them. The bundle detail page
+   * is always shown: it is the guaranteed place to undo a hidden surface, so the
+   * configuration can hide the other two but never lock itself out.
+   */
   function surfacesOf() {
     return {
-      plugin: conf('pluginPage', true) === true,
+      plugin: true,
       settings: conf('settingsSection', true) === true,
       composer: conf('composerPanel', true) === true,
     }
@@ -531,10 +542,13 @@ export function apply(ctx, config) {
    * @param agent - the Agent the command ran for.
    * @param kind - `success` or `error`.
    * @param text - the sentence the UI renders.
+   * @param extra - an optional machine-readable payload placed before the markers, so the
+   *   panels can parse it without depending on message order.
    */
-  function result(agent, kind, text) {
+  function result(agent, kind, text, extra) {
     const off = agent?.session?.id === undefined ? false : isOff(agent)
-    return { kind, text: `${text} ${markerOf(off)} [web-state]${JSON.stringify(stateOf(agent))}` }
+    const payload = extra === undefined ? '' : ` ${extra}`
+    return { kind, text: `${text}${payload} ${markerOf(off)} [web-state]${JSON.stringify(stateOf(agent))}` }
   }
 
   /**
@@ -564,24 +578,106 @@ export function apply(ctx, config) {
   }
 
   /**
-   * The tool names this Session keeps while the network is off: the built-in local
-   * names, the dual-use shell, plus whatever the configuration adds for everyone or
-   * for this Session. Names the catalog does not know are dropped — `restrict()`
-   * throws on an unknown name instead of narrowing.
+   * The names `restrict()` would accept for one Agent. The plugin's own view is the
+   * global one, and it misses whatever a profile composes *around* the Agent — the web
+   * tools among them. When the Agent's handle has no view of its own, ask `restrict()`
+   * directly: a probe name it rejects makes it report the catalogue it does accept.
+   * @param agent - the Agent whose scope is asked for.
+   * @returns the accepted names, or undefined when they cannot be learned.
+   */
+  function restrictableOf(agent) {
+    // The probe comes first on purpose: it is the only call that runs in the Agent's own
+    // scope, so it reports the catalogue `restrict()` will actually validate against. A
+    // plain view() is the global one and misses everything a profile composes around the
+    // Agent — the web tools among them.
+    try {
+      const probe = agent.ctx.tools.restrict({ deny: [PROBE_NAME] })
+      // Accepted: the deployment does not validate names. Nothing was hidden by an empty
+      // deny, so drop it and fall through to the views.
+      safely(() => probe())
+    } catch (error) {
+      const probed = namesFromUnknownToolError(error)
+      if (probed !== undefined) return probed
+    }
+    const direct = safely(() => agent?.ctx?.tools?.view?.().restrictableNames)
+    if (direct !== undefined) return direct
+    return safely(() => ctx.tools.view().restrictableNames)
+  }
+
+  /**
+   * `restrict()` rejects an unknown name with `… unknown global tool "x"; known global
+   * tools: a, b, c`. That tail is the authoritative allowlist catalogue for the scope
+   * the call ran in, which is the only catalogue this plugin can reach.
+   * @param error - the error `restrict()` threw.
+   * @returns the accepted names, or undefined when the message is not that one.
+   */
+  function namesFromUnknownToolError(error) {
+    const message = String(error?.message ?? '')
+    const marker = 'known global tools: '
+    const index = message.indexOf(marker)
+    if (index < 0) return undefined
+    const names = message
+      .slice(index + marker.length)
+      .split(',')
+      .map((name) => name.trim().replace(/^["']|["']$/g, ''))
+      .filter((name) => name !== '')
+    return new Set(names)
+  }
+
+  /**
+   * The list one scope keeps while the network is off. The three layers are complete
+   * lists, nearest first: this Session's override, the global override, and the
+   * built-in local names. An empty list is "not configured", not "keep nothing" — the
+   * switch must never be able to leave a Session with no tools at all.
+   * @param agent - the Agent whose allowlist is composed.
+   * @returns the kept names and which layer supplied them.
+   */
+  function keepOf(agent) {
+    const sessionId = agent?.session?.id
+    const session = sessionToolsOf(sessionId)
+    if (session.length > 0) return { list: session, source: 'session' }
+    const global = confTools('globalTools')
+    if (global.length > 0) return { list: global, source: 'global' }
+    return { list: [...LOCAL_TOOLS, ...GUARDED_TOOLS], source: 'default' }
+  }
+
+  /**
+   * The tool names this Agent keeps while the network is off, narrowed to what
+   * `restrict()` accepts — it throws on an unknown name instead of ignoring it.
    * @param agent - the Agent whose allowlist is composed.
    * @returns the allowlist to hand to `tools.restrict()`.
    */
   function sessionAllow(agent) {
-    const sessionId = agent?.session?.id
-    const wanted = [...LOCAL_TOOLS, ...GUARDED_TOOLS, ...confTools('globalTools'), ...sessionToolsOf(sessionId)]
-    const unique = wanted.filter((name, index) => wanted.indexOf(name) === index)
-    // Ask the Agent's own view first: it is the same view `restrict()` validates against,
-    // and it also sees tools the Session's preset registered on top of the globals.
-    const known = safely(() => agent?.ctx?.tools?.view?.().restrictableNames) ?? safely(() => ctx.tools.view().restrictableNames)
-    if (known === undefined) return []
+    const { list } = keepOf(agent)
+    const unique = list.filter((name, index) => list.indexOf(name) === index)
+    const known = restrictableOf(agent)
+    if (known === undefined) return unique
     return unique.filter((name) => known.has(name))
   }
 
+  /**
+   * Apply a whitelist restriction, learning the accepted names when composing the list
+   * was not enough: the first attempt doubles as a probe, and a retry keeps only the
+   * names that scope admits.
+   * @param agent - the Agent to restrict.
+   * @param allow - the names to keep.
+   * @returns the disposer, or the error that prevented the restriction.
+   */
+  function openRestriction(agent, allow) {
+    try {
+      return { dispose: agent.ctx.tools.restrict({ allow }) }
+    } catch (error) {
+      const known = namesFromUnknownToolError(error)
+      if (known === undefined) return { error }
+      const narrowed = allow.filter((name) => known.has(name))
+      if (narrowed.length === allow.length) return { error }
+      try {
+        return { dispose: agent.ctx.tools.restrict({ allow: narrowed }) }
+      } catch (retry) {
+        return { error: retry }
+      }
+    }
+  }
 
   /**
    * Hide every network-capable tool for one Agent and arm the request-series rebuild.
@@ -604,20 +700,21 @@ export function apply(ctx, config) {
     // Arm BEFORE the restriction lands: if the restriction is resolvable while the
     // mark is missing, a request could describe the old catalog.
     pendingSeries.add(sessionId)
-    let dispose
+    const opened = openRestriction(agent, allow)
+    if (opened.error !== undefined) {
+      pendingSeries.delete(sessionId)
+      return result(agent, 'error', `无法断网 / Could not turn the network off: ${messageOf(opened.error)}`)
+    }
     let disposeGuard
     try {
-      // Scope-bound: the restriction applies to this Agent alone, and it fails closed —
-      // a tool that is not in the allowlist (including one added later) is hidden.
-      dispose = agent.ctx.tools.restrict({ allow })
       // The kept dual-use tools are fenced here rather than hidden.
       disposeGuard = agent.ctx.tools.guard(networkGuard)
     } catch (error) {
       pendingSeries.delete(sessionId)
-      if (dispose !== undefined) safely(() => dispose())
+      safely(() => opened.dispose())
       return result(agent, 'error', `无法断网 / Could not turn the network off: ${messageOf(error)}`)
     }
-    offSessions.set(sessionId, { agent, dispose, disposeGuard })
+    offSessions.set(sessionId, { agent, dispose: opened.dispose, disposeGuard })
     return report(agent, true)
   }
 
@@ -679,19 +776,23 @@ export function apply(ctx, config) {
       // Arm first, then swap layers: the new restriction lands before the old one is
       // lifted, so the catalog never widens in between.
       pendingSeries.add(sessionId)
-      let dispose
-      let disposeGuard
-      try {
-        dispose = row.agent.ctx.tools.restrict({ allow })
-        disposeGuard = row.agent.ctx.tools.guard(networkGuard)
-      } catch (error) {
-        if (dispose !== undefined) safely(() => dispose())
+      const opened = openRestriction(row.agent, allow)
+      if (opened.error !== undefined) {
+        pendingSeries.delete(sessionId)
         skipped += 1
         continue
       }
-      offSessions.set(sessionId, { agent: row.agent, dispose, disposeGuard })
-      safely(() => row.dispose())
-      safely(() => row.disposeGuard?.())
+      const previous = row.dispose
+      const previousGuard = row.disposeGuard
+      let nextGuard
+      try {
+        nextGuard = row.agent.ctx.tools.guard(networkGuard)
+      } catch {
+        nextGuard = previousGuard
+      }
+      offSessions.set(sessionId, { agent: row.agent, dispose: opened.dispose, disposeGuard: nextGuard })
+      safely(() => previous())
+      if (nextGuard !== previousGuard) safely(() => previousGuard?.())
       applied += 1
     }
     return { applied, skipped }
@@ -705,58 +806,131 @@ export function apply(ctx, config) {
     return undefined
   }
 
-  /** The list one `allow` form edits, and how to write it back. */
-  function allowEditor(global, sessionId) {
-    if (global) {
-      return {
-        read: (current) => (Array.isArray(current.globalTools) ? current.globalTools : []),
-        write: (current, list) => ({ ...current, globalTools: list }),
-      }
-    }
-    return {
-      read: (current) => {
-        const map = current.sessionTools
-        const list = map !== null && typeof map === 'object' ? map[sessionId] : undefined
-        return Array.isArray(list) ? list : []
-      },
-      write: (current, list) => {
-        const map = current.sessionTools !== null && typeof current.sessionTools === 'object' ? { ...current.sessionTools } : {}
-        if (list.length === 0) delete map[sessionId]
-        else map[sessionId] = list
-        return { ...current, sessionTools: map }
-      },
-    }
+  /** The complete keep-list one scope currently holds, as a plain array. */
+  function readOverride(current, global, sessionId) {
+    if (global) return Array.isArray(current.globalTools) ? current.globalTools : []
+    const map = current.sessionTools
+    const list = map !== null && typeof map === 'object' ? map[sessionId] : undefined
+    return Array.isArray(list) ? list : []
+  }
+
+  /** Replace the complete keep-list of one scope; an empty list means "inherit". */
+  function writeOverride(current, global, sessionId, list) {
+    if (global) return { ...current, globalTools: list }
+    const map = current.sessionTools !== null && typeof current.sessionTools === 'object' ? { ...current.sessionTools } : {}
+    if (list.length === 0) delete map[sessionId]
+    else map[sessionId] = list
+    return { ...current, sessionTools: map }
+  }
+
+  /**
+   * Turn one tool on or off for one scope. The scope keeps a *complete* list, so the
+   * first edit materialises the list that was in force (the built-in names, or the
+   * layer below), and later edits just toggle a member.
+   * @param agent - the Agent the command ran for.
+   * @param name - the tool name.
+   * @param value - true to keep it while the network is off, false to hide it.
+   * @param global - whether the edit lands in the global layer.
+   * @returns what the write did.
+   */
+  async function writeKeep(agent, name, value, global) {
+    const sessionId = agent.session.id
+    // A global edit starts from the global layer, not from whatever this Session already
+    // narrowed down to: otherwise one task's list would leak into every other task.
+    const globalList = confTools('globalTools')
+    const base = global ? (globalList.length > 0 ? globalList : [...LOCAL_TOOLS, ...GUARDED_TOOLS]) : keepOf(agent).list
+    const saved = await saveConfig((current) => {
+      const existing = readOverride(current, global, sessionId)
+      const list = existing.length > 0 ? existing : base
+      const next = value === true ? (list.includes(name) ? list : [...list, name]) : list.filter((entry) => entry !== name)
+      return writeOverride(current, global, sessionId, next)
+    })
+    return saved
+  }
+
+  /**
+   * Reset one scope back to the layer below it.
+   * @param agent - the Agent the command ran for.
+   * @param global - whether the edit lands in the global layer.
+   * @returns what the write did.
+   */
+  async function resetKeep(agent, global) {
+    return saveConfig((current) => writeOverride(current, global, agent.session.id, []))
   }
 
   /** One sentence describing the lists and the surface switches. */
   function describeConfig(agent) {
     const surfaces = surfacesOf()
-    const global = confTools('globalTools')
-    const session = sessionToolsOf(agent?.session?.id)
+    const { list, source } = keepOf(agent)
     const flags = `pluginPage=${surfaces.plugin ? 'on' : 'off'} settingsSection=${surfaces.settings ? 'on' : 'off'} composerPanel=${surfaces.composer ? 'on' : 'off'}`
-    const globalText = global.length === 0 ? '（空 / none）' : global.join(', ')
-    const sessionText = session.length === 0 ? '（空 / none）' : session.join(', ')
+    const where = source === 'session' ? '本会话 / this Session' : source === 'global' ? '全局 / global' : '内置默认 / built-in'
     const writable = canSave() ? '' : '（本 profile 不能写配置，改动只在本次运行生效 / this profile cannot save, changes last until restart）'
-    return `${flags}；全局保留 / global keep: ${globalText}；本会话保留 / this Session keep: ${sessionText}。${writable}`
+    return `${flags}；保留 ${list.length} 个工具（${where}）/ keeping ${list.length} tool(s) from ${where}.${writable}`
   }
 
   /**
-   * Read or write the plugin's own settings: the three browser surfaces, the global
-   * keep-list, and this Session's keep-list.
+   * The catalogue the panels draw: every name this Agent's scope would accept, with
+   * whether it is kept right now.
+   * @param agent - the Agent the command ran for.
+   */
+  function catalogueOf(agent) {
+    const known = restrictableOf(agent)
+    const { list, source } = keepOf(agent)
+    const kept = new Set(list)
+    const names = known === undefined ? list : [...known]
+    names.sort((left, right) => left.localeCompare(right))
+    return {
+      source,
+      tools: names.map((name) => ({ name, kept: kept.has(name), builtIn: LOCAL_TOOLS.includes(name) || GUARDED_TOOLS.includes(name) })),
+    }
+  }
+
+  /**
+   * Read or write the plugin's own settings: the three browser surfaces, the keep-list,
+   * and the tool catalogue the panels render.
    * @param agent - the Agent the command ran for (its Session owns the per-Session list).
-   * @param verb - `config`, `surface`, or `allow`.
+   * @param verb - `config`, `surface`, `tools`, `keep`, or `allow`.
    * @param args - the remaining tokens.
    * @returns the command result the UI renders.
    */
   async function configure(agent, verb, args) {
+    const global = args.includes('--global')
+    const sessionId = agent.session.id
+    const tokens = args.filter((token) => token !== '--global')
+    // Every keep/surface answer carries the fresh catalogue, so a panel updates its
+    // switches from one round-trip instead of asking again.
+    const toolsMarker = () => `[web-tools]${JSON.stringify(catalogueOf(agent))}`
+    const tunedText = (tuned) =>
+      tuned.applied === 0 && tuned.skipped === 0 ? '' : ` 已刷新 ${tuned.applied}${tuned.skipped === 0 ? '' : `，跳过 ${tuned.skipped}（正在执行）`}`
+
     if (verb === 'config') return result(agent, 'success', describeConfig(agent))
+
+    if (verb === 'tools') {
+      const catalogue = catalogueOf(agent)
+      return result(
+        agent,
+        'success',
+        `共 ${catalogue.tools.length} 个可用工具 / ${catalogue.tools.length} tool(s) in this catalogue`,
+        `[web-tools]${JSON.stringify(catalogue)}`,
+      )
+    }
+
     if (verb === 'surface') {
-      const key = (args[0] ?? '').toLowerCase()
+      const key = (tokens[0] ?? '').toLowerCase()
       const field = SURFACE_FIELDS[key]
       if (field === undefined) {
-        return result(agent, 'error', `未知的显示位置 / unknown surface "${args[0] ?? ''}"; use plugin|settings|composer`)
+        return result(agent, 'error', `未知的显示位置 / unknown surface "${tokens[0] ?? ''}"; use plugin|settings|composer`)
       }
-      const value = parseSwitch(args[1])
+      if (key === 'plugin') {
+        // Keep one door that cannot be closed: hiding this page is how a user could lose
+        // the only surface the other two are restored from.
+        return result(
+          agent,
+          'success',
+          '本插件详情页始终显示，不能关闭：它是把其它面板重新打开的保底入口 / The bundle detail page is always shown; it is the entry that brings the other panels back.',
+        )
+      }
+      const value = parseSwitch(tokens[1])
       if (value === undefined) return result(agent, 'error', `用法 / usage: /${COMMAND} surface ${key} on|off`)
       const saved = await saveConfig((current) => ({ ...current, [field]: value }))
       if (!saved.saved) {
@@ -766,62 +940,73 @@ export function apply(ctx, config) {
           `没能保存显示设置 / Could not save the surface setting: ${saved.reason === 'no-editor' || saved.reason === 'no-entry' ? '这个 profile 没有配置文件可写 / this profile has no writable configuration' : saved.reason}`,
         )
       }
-      return result(agent, 'success', `已把 ${key} 配置面板设为${value ? '显示' : '隐藏'} / ${key} panel is now ${value ? 'shown' : 'hidden'}. ${describeConfig(agent)}`)
-    }
-    // verb === 'allow'
-    const action = (args[0] ?? '').toLowerCase()
-    const global = args.includes('--global')
-    const names = args.slice(1).filter((token) => token !== '--global')
-    if (action === 'list' || action === '') return result(agent, 'success', describeConfig(agent))
-    if (action === 'clear') {
-      const editor = allowEditor(global, agent.session.id)
-      const saved = await saveConfig((current) => editor.write(current, []))
-      if (!saved.saved) return result(agent, 'error', `没能保存白名单 / Could not save the allowlist: ${saved.reason}`)
-      const tuned = retune()
       return result(
         agent,
         'success',
-        `已清空${global ? '全局' : '本会话'}保留名单 / Cleared the ${global ? 'global' : 'Session'} keep-list. 生效 ${tuned.applied}${tuned.skipped === 0 ? '' : `，跳过 ${tuned.skipped}（正在执行）`}`,
+        `已把 ${key} 配置面板设为${value ? '显示' : '隐藏'} / ${key} panel is now ${value ? 'shown' : 'hidden'}. ${describeConfig(agent)}`,
+        toolsMarker(),
       )
     }
-    const removing = action === 'remove' || action === 'rm' || action === 'delete' || action === '-' || action === 'del'
-    if (!removing && action !== 'add' && action !== '+') {
-      return result(agent, 'error', `用法 / usage: /${COMMAND} allow add|remove <tool> [--global] | allow clear [--global] | allow list`)
-    }
-    const name = (names[0] ?? '').trim()
-    if (name === '') {
-      return result(agent, 'error', `用法 / usage: /${COMMAND} allow ${removing ? 'remove' : 'add'} <tool> [--global]`)
-    }
-    // The catalog is asked twice: the root view knows the global tools, the agent's own
-    // view also knows whatever this Session's preset registered. A name outside both is
-    // almost always a typo, but it is only a warning — a tool registered later, or by a
-    // sibling scope, still belongs in the keep list.
-    const rootKnown = safely(() => ctx.tools.view().knownNames)
-    const agentKnown = safely(() => agent?.ctx?.tools?.view?.().knownNames)
-    const recognized =
-      (rootKnown !== undefined && rootKnown.has(name)) || (agentKnown !== undefined && agentKnown.has(name))
-    const unknown = removing || recognized ? '' : `没有在当前目录里找到 ${name}（照样记下了，拼错就不会生效）/ "${name}" is not in the current catalog (kept anyway)`
-    const editor = allowEditor(global, agent.session.id)
-    const saved = await saveConfig((current) => {
-      const list = editor.read(current)
-      const next = removing ? list.filter((entry) => entry !== name) : list.includes(name) ? list : [...list, name]
-      return editor.write(current, next)
-    })
-    if (!saved.saved) return result(agent, 'error', `没能保存白名单 / Could not save the allowlist: ${saved.reason}`)
-    const tuned = retune()
+
+    // Everything below edits the keep-list. `allow` is the older spelling and stays an
+    // alias so a panel cached in a browser tab keeps working across an upgrade.
+    const action = (tokens[0] ?? '').toLowerCase()
     const scope = global ? '全局 / global' : '本会话 / this Session'
-    const note = removing
-      ? `已从${scope}保留名单移除 ${name} / Removed "${name}" from the ${global ? 'global' : 'Session'} keep-list.`
-      : `已把 ${name} 加入${scope}保留名单：断网时它也保留 / Added "${name}" to the ${global ? 'global' : 'Session'} keep-list; it stays available while the network is off.`
-    const tunedText = tuned.applied === 0 && tuned.skipped === 0 ? '' : ` 已刷新 ${tuned.applied}${tuned.skipped === 0 ? '' : `，跳过 ${tuned.skipped}（正在执行）`}`
-    const warning = unknown === '' ? '' : `${unknown}；`
-    return result(agent, 'success', `${warning}${note}${tunedText} ${describeConfig(agent)}`)
+
+    if (action === 'list' || action === '') return result(agent, 'success', describeConfig(agent))
+
+    if (action === 'clear' || action === 'reset') {
+      const saved = await resetKeep(agent, global)
+      if (!saved.saved) return result(agent, 'error', `没能保存白名单 / Could not save the keep-list: ${saved.reason}`)
+      return result(
+        agent,
+        'success',
+        `已把${scope}保留名单交还给上一层 / Reset the ${global ? 'global' : 'Session'} keep-list to the layer below.${tunedText(retune())}`,
+        toolsMarker(),
+      )
+    }
+
+    const removing = action === 'remove' || action === 'rm' || action === 'delete' || action === 'del' || action === '-' || action === 'off'
+    const adding = action === 'add' || action === '+' || action === 'set' || action === 'on' || verb === 'keep'
+    if (!removing && !adding) {
+      return result(agent, 'error', `用法 / usage: /${COMMAND} keep <tool> on|off [--global] | /${COMMAND} keep reset [--global] | /${COMMAND} tools`)
+    }
+    // `keep <tool> on|off` and `keep set <tool> on|off` and `allow add|remove <tool>` all
+    // land here; find the name and the value whichever spelling was used.
+    let name = ''
+    let value
+    if (verb === 'keep') {
+      // `keep <tool> on|off`: the name comes first, the switch second.
+      name = tokens[0] ?? ''
+      value = parseSwitch(tokens[1])
+    } else {
+      // `allow add|remove <tool>`: the verb already carries the direction.
+      name = tokens[1] ?? ''
+      value = removing ? false : true
+    }
+    if (name === '') {
+      return result(agent, 'error', `用法 / usage: /${COMMAND} keep <tool> on|off [--global]`)
+    }
+    if (value === undefined) {
+      return result(agent, 'error', `用法 / usage: /${COMMAND} keep ${name} on|off [--global]`)
+    }
+    const known = restrictableOf(agent)
+    const saved = await writeKeep(agent, name, value, global)
+    if (!saved.saved) return result(agent, 'error', `没能保存白名单 / Could not save the keep-list: ${saved.reason}`)
+    const tuned = retune()
+    const warning = known !== undefined && !known.has(name)
+      ? `这个目录里没有 ${name}（已记下，注册后即生效）/ "${name}" is not in this catalogue (recorded, takes effect once registered)；`
+      : ''
+    const note = value
+      ? `已让 ${name} 在断网时保留 / "${name}" now stays available while the network is off.`
+      : `已让 ${name} 在断网时隐藏 / "${name}" is now hidden while the network is off.`
+    return result(agent, 'success', `${warning}${note}（${scope}）${tunedText(tuned)} ${describeConfig(agent)}`, toolsMarker())
   }
 
   /**
    * Switch this Session's web tools on or off, or configure the switch.
    * @param agent - the receiving Agent (the Session whose switch is being changed).
-   * @param rawInput - `on`, `off`, `status`, `surface …`, `allow …`, `config`, or empty to toggle.
+   * @param rawInput - `on`, `off`, `status`, `tools`, `surface …`, `keep …`, `allow …`, `config`, or empty to toggle.
    * @returns the command result the UI renders.
    */
   function toggle(agent, rawInput) {
@@ -830,7 +1015,7 @@ export function apply(ctx, config) {
     const requested = head.toLowerCase()
     // The configuration forms need no Agent state, but the Session still scopes the
     // per-Session list; only the plain switch needs a Session at all.
-    if (requested === 'config' || requested === 'surface' || requested === 'allow') {
+    if (requested === 'config' || requested === 'surface' || requested === 'tools' || requested === 'keep' || requested === 'allow') {
       if (agent?.session?.id === undefined) {
         return { kind: 'error', text: '没有可配置的会话 / No Session to configure.' }
       }
@@ -843,7 +1028,7 @@ export function apply(ctx, config) {
     if (requested !== '' && requested !== 'on' && requested !== 'off') {
       return {
         kind: 'error',
-        text: `用法 / usage: /${COMMAND} [on|off|status|config] | /${COMMAND} surface <plugin|settings|composer> on|off | /${COMMAND} allow add|remove <tool> [--global] | /${COMMAND} allow clear [--global]`,
+        text: `用法 / usage: /${COMMAND} [on|off|status] | /${COMMAND} tools | /${COMMAND} keep <tool> on|off [--global] | /${COMMAND} surface <plugin|settings|composer> on|off`,
       }
     }
     const current = isOff(agent)
@@ -867,7 +1052,7 @@ export function apply(ctx, config) {
   ctx.commands.register({
     name: COMMAND,
     description: 'Punch the network switch for this Session, or configure which panels show and which tools stay.',
-    input: { hint: 'on|off|status|config|surface <plugin|settings|composer> on|off|allow add|remove <tool> [--global]' },
+    input: { hint: 'on|off|status|tools|keep <tool> on|off [--global]|surface <plugin|settings|composer> on|off' },
     handler: ({ agent, rawInput }) => toggle(agent, rawInput),
   })
 }

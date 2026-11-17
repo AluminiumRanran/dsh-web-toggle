@@ -399,6 +399,12 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
 }
 
 /** 从结果文本里取回机器可读状态；没有就说明半侧没按约定上报。 */
+const toolsOf = (text) => {
+  const matched = /\[web-tools\](\{[^\s]*\})/.exec(text)
+  assert.ok(matched !== null, `结果要带 [web-tools]：${text}`)
+  return JSON.parse(matched[1])
+}
+
 const stateOf = (text) => {
   const matched = /\[web-state\](\{.*\})\s*$/.exec(text)
   assert.ok(matched !== null, `结果要带 [web-state]：${text}`)
@@ -452,41 +458,51 @@ function makeConfigCtx(initial = {}) {
   assert.equal(values.settingsSection, false, 'surface settings off 要落到配置')
   assert.equal(stateOf(hidden.text).surfaces.settings, false, '结果要回报新状态')
   assert.equal(writes.length, 1, '一次点击只写一次配置')
-  await call2(agent, 'surface plugin off')
+  // 详情页是保底入口：永远开，拒绝关闭，并把理由说清楚
+  const locked = await call2(agent, 'surface plugin off')
+  assert.equal(locked.kind, 'success', '关闭详情页要给一句解释，而不是报错')
+  assert.match(locked.text, /始终显示|always shown/, '要说清详情页不能关')
+  assert.equal(values.pluginPage, true, 'pluginPage 不该被改')
+  assert.equal(stateOf(locked.text).surfaces.plugin, true, '状态里详情页始终为开')
   await call2(agent, 'surface composer off')
   assert.deepEqual(
     [values.pluginPage, values.settingsSection, values.composerPanel],
-    [false, false, false],
-    '三个入口都能单独关闭',
+    [true, false, false],
+    '侧边栏与小箭头可以单独关闭，详情页保持开',
   )
   await call2(agent, 'surface composer on')
   assert.equal(values.composerPanel, true, '也能再打开')
   assert.equal((await call2(agent, 'surface nope on')).kind, 'error', '未知入口要报错')
-  assert.equal((await call2(agent, 'surface plugin')).kind, 'error', '缺 on/off 要报用法')
+  assert.equal((await call2(agent, 'surface settings')).kind, 'error', '缺 on/off 要报用法')
 
-  // 本会话白名单
+  // 本会话名单：默认从"内置保留"这份完整名单起步，开关只增删成员
   const added = await call2(agent, 'allow add read')
-  assert.equal(added.kind, 'success', `加白名单应成功：${added.text}`)
-  assert.deepEqual(values.sessionTools.c1, ['read'], '默认加到本会话')
-  assert.deepEqual(stateOf(added.text).session, ['read'], '状态里要出现本会话白名单')
+  assert.equal(added.kind, 'success', `加名单应成功：${added.text}`)
+  assert.ok(values.sessionTools.c1.includes('read'), '默认加到本会话')
+  assert.ok(values.sessionTools.c1.includes('ops_bash'), '内置保留项也在名单里')
+  assert.deepEqual(stateOf(added.text).session, values.sessionTools.c1, '状态里要出现本会话名单')
+  const size = values.sessionTools.c1.length
   await call2(agent, 'allow add read')
-  assert.deepEqual(values.sessionTools.c1, ['read'], '重复添加不该出现两条')
+  assert.equal(values.sessionTools.c1.length, size, '重复添加不该出现两条')
   // 目录里没有的名字照样记下，但要明确提醒（目录可能只覆盖当前作用域）。
   const typo = await call2(agent, 'allow add nope')
   assert.equal(typo.kind, 'success', '未知名字不该再硬拒绝')
-  assert.ok(typo.text.includes('没有在当前目录里找到 nope'), '要提示名字可能写错')
+  assert.ok(typo.text.includes('这个目录里没有 nope'), '要提示名字可能写错')
   await call2(agent, 'allow remove nope')
 
   // 全局白名单
+  const sessionBefore = [...values.sessionTools.c1]
   const global = await call2(agent, 'allow add write --global')
   assert.equal(global.kind, 'success', `全局加白应成功：${global.text}`)
-  assert.deepEqual(values.globalTools, ['write'], '--global 落到全局')
-  assert.deepEqual(stateOf(global.text).global, ['write'])
-  assert.deepEqual(values.sessionTools.c1, ['read'], '全局改动不该污染本会话')
+  assert.ok(values.globalTools.includes('write'), '--global 落到全局')
+  assert.ok(values.globalTools.length > 1, '全局名单同样是完整名单')
+  assert.deepEqual(stateOf(global.text).global, values.globalTools)
+  assert.deepEqual(values.sessionTools.c1, sessionBefore, '全局改动不该污染本会话')
 
   // 移除与清空
   await call2(agent, 'allow remove read')
-  assert.equal(values.sessionTools.c1, undefined, '移除最后一个后整条会话记录消失')
+  assert.ok(!values.sessionTools.c1.includes('read'), '移除后名单里不再有它')
+  assert.ok(values.sessionTools.c1.length > 0, '移除一个不等于清空')
   await call2(agent, 'allow clear --global')
   assert.deepEqual(values.globalTools, [], '清空全局')
 
@@ -499,7 +515,7 @@ function makeConfigCtx(initial = {}) {
   const bareConfig = Object.fromEntries(Object.keys(bareValues).map((key) => [key, { get: () => bareValues[key] }]))
   apply(bareCtx, bareConfig)
   const bare = (agentRef, rawInput) => bareCommands.get('webtoggle').handler({ agent: agentRef, rawInput })
-  const refused = await bare(agent, 'surface plugin off')
+  const refused = await bare(agent, 'surface settings off')
   assert.equal(refused.kind, 'error', '没有编辑器时不能报成功')
   assert.match(refused.text, /没有配置文件可写/, '要说清是 profile 不可写')
   assert.equal(stateOf(refused.text).writable, false, '状态要如实报告不可写')
@@ -528,7 +544,7 @@ function makeConfigCtx(initial = {}) {
   agent.status = 'running'
   const skipped = await call2(agent, 'allow add write')
   assert.equal(restrictions.length, 2, '执行中不重新下发')
-  assert.deepEqual(values.sessionTools.c2, ['read', 'write'], '配置仍要保存')
+  assert.ok(values.sessionTools.c2.includes('read') && values.sessionTools.c2.includes('write'), '配置仍要保存')
   assert.match(skipped.text, /跳过 1/, '要如实说明跳过了几个会话')
 
   // 下一轮结束后再切换一次，新配置就位
@@ -538,6 +554,61 @@ function makeConfigCtx(initial = {}) {
   assert.ok(restrictions.at(-1).allow.includes('write'), '恢复后再断网要带上新工具')
   await call2(agent, 'on')
   console.log('14 白名单改动即时生效 / 执行中跳过 ok')
+}
+
+// 15. 工具目录：列出全部工具并逐个开关（会话 / 全局三层）
+{
+  const { ctx: configCtx, commands: configCommands, values, config } = makeConfigCtx()
+  apply(configCtx, config)
+  const run = configCommands.get('webtoggle').handler
+  const call3 = (agentRef, rawInput) => run({ agent: agentRef, rawInput })
+  const { agent } = makeAgent('c15')
+  const entry = (catalogue, name) => catalogue.tools.find((tool) => tool.name === name)
+
+  const listed = await call3(agent, 'tools')
+  assert.equal(listed.kind, 'success', `tools 应成功：${listed.text}`)
+  const catalogue = toolsOf(listed.text)
+  assert.equal(catalogue.source, 'default', '没配置过时来源是内置名单')
+  const names = catalogue.tools.map((tool) => tool.name)
+  assert.deepEqual(names, [...names].sort(), '目录按名字排序')
+  assert.ok(names.includes('web_search'), '目录要包含被隐藏的工具')
+  assert.equal(entry(catalogue, 'web_search').kept, false, '默认不保留 web_search')
+  assert.equal(entry(catalogue, 'ops_bash').kept, true, '默认保留 shell')
+  assert.equal(entry(catalogue, 'web_search').builtIn, false, '膜外工具不算内置项')
+  assert.equal(entry(catalogue, 'ops_bash').builtIn, true, '内置保留项要带标记')
+
+  const kept = await call3(agent, 'keep web_search on')
+  assert.equal(kept.kind, 'success', `keep on 应成功：${kept.text}`)
+  assert.equal(toolsOf(kept.text).source, 'session', '改了本会话就转为会话层')
+  assert.equal(entry(toolsOf(kept.text), 'web_search').kept, true, '开关后目录立即变化')
+  assert.ok(values.sessionTools.c15.includes('web_search'), '落盘到 sessionTools')
+
+  const dropped = await call3(agent, 'keep ops_bash off')
+  assert.equal(entry(toolsOf(dropped.text), 'ops_bash').kept, false, '内置项也能关掉')
+  assert.ok(!values.sessionTools.c15.includes('ops_bash'), '关掉就是从名单里移出')
+
+  const reset = await call3(agent, 'keep reset')
+  assert.equal(values.sessionTools.c15, undefined, 'reset 交还上一层（不留空数组）')
+  assert.equal(toolsOf(reset.text).source, 'default', '回到内置名单')
+
+  const globalKeep = await call3(agent, 'keep write on --global')
+  assert.ok(values.globalTools.includes('write'), '--global 写全局层')
+  assert.equal(toolsOf(globalKeep.text).source, 'global', '会话没配置时用的是全局层')
+  assert.equal(entry(toolsOf(globalKeep.text), 'write').kept, true)
+
+  // 未知名字不该出现在目录里，也不会被记进名单
+  const unknown = await call3(agent, 'keep nope on')
+  assert.ok(!toolsOf(unknown.text).tools.some((tool) => tool.name === 'nope'), '目录不收录不存在的工具')
+  assert.match(unknown.text, /这个目录里没有 nope/, '要提醒名字可能写错')
+
+  // 断网时打开的名单要立刻生效：白名单里必须带上 web_search
+  const { agent: live, restrictions } = makeAgent('c16')
+  await call3(live, 'off')
+  await call3(live, 'keep web_search on')
+  assert.equal(restrictions.length, 2, '改名单要重新下发')
+  assert.ok(restrictions.at(-1).allow.includes('web_search'), '新白名单要带上刚保留的工具')
+  await call3(live, 'on')
+  console.log('15 工具目录 / keep 开关（会话、全局、即时生效） ok')
 }
 
 console.log('\n全部通过')

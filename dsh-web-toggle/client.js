@@ -40,6 +40,38 @@ window.__ModuleLoader__.load({
      * re-raises the "the host restarted" note; a real page reload clears it.
      */
     const probedSessions = new Set()
+    /**
+     * Which surfaces the configuration currently shows. The Host owns this, every panel
+     * publishes what it learns, and `apply` mounts or unmounts the slots to match — a
+     * hidden surface has to leave no empty entry behind, not merely render nothing.
+     */
+    const liveSurfaces = { plugin: true, settings: true, composer: true }
+    /** Re-sync callbacks run whenever `liveSurfaces` changes. */
+    const surfaceWatchers = new Set()
+
+    /**
+     * Publish the surfaces one Host answer carried.
+     * @param next - the `surfaces` object of a `[web-state]` payload.
+     */
+    const publishSurfaces = (next) => {
+      if (next === null || next === undefined || typeof next !== 'object') return
+      let changed = false
+      for (const key of Object.keys(liveSurfaces)) {
+        const value = next[key]
+        if (typeof value !== 'boolean' || value === liveSurfaces[key]) continue
+        liveSurfaces[key] = value
+        changed = true
+      }
+      if (!changed) return
+      for (const watcher of [...surfaceWatchers]) {
+        try {
+          watcher()
+        } catch (error) {
+          /* one broken watcher must not stop the others */
+        }
+      }
+    }
+
     /** How long a settled note stays in the tool row. */
     const NOTE_MS = 9000
     /** The last Session id any composer drew in this page; the global panels need one. */
@@ -81,6 +113,11 @@ window.__ModuleLoader__.load({
 .dswt-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 4px 1px 7px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:11px}
 .dswt-chip button{border:none;background:0 0;cursor:pointer;color:inherit;padding:0 2px;line-height:1;font-size:12px;opacity:.65}
 .dswt-chip button:hover{opacity:1}
+.dswt-tools{display:flex;flex-direction:column;gap:2px;max-height:220px;overflow:auto;margin:2px 0;padding-right:2px}
+.dswt-tool{padding:1px 0}
+.dswt-tool-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:11px;display:inline-flex;align-items:center;gap:4px}
+.dswt-badge{font-family:inherit;font-size:10px;padding:0 4px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14));color:var(--dsw-alias-label-secondary);line-height:14px}
+.dswt-btn[data-on="true"]{border-color:transparent;background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16))}
 .dswt-add{display:flex;gap:6px;align-items:center}
 .dswt-input{flex:1;min-width:0;height:26px;padding:0 7px;border-radius:6px;border:1px solid var(--dsw-alias-border-neutral,rgba(127,127,127,.35));background:var(--dsw-alias-bg-base,transparent);color:inherit;font:inherit}
 .dswt-input:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary))}
@@ -122,6 +159,14 @@ window.__ModuleLoader__.load({
         'panel.stateOn': 'On: the full tool list is available.',
         'panel.sessionKeep': 'Extra tools this task keeps',
         'panel.globalKeep': 'Extra tools every task keeps',
+        'panel.sessionTools': 'Tools this task keeps',
+        'panel.globalTools': 'Tools every task keeps',
+        'panel.filter': 'filter tools',
+        'panel.noTools': 'No tool matches this filter.',
+        'panel.keep': 'Keep',
+        'panel.drop': 'Hide',
+        'panel.builtIn': 'built-in',
+        'panel.alwaysOn': 'always shown',
         'panel.add': 'Add',
         'panel.placeholder': 'tool name, for example read',
         'panel.empty': 'Nothing extra yet.',
@@ -132,8 +177,8 @@ window.__ModuleLoader__.load({
         'panel.surface.composer': 'Caret beside the composer toggle',
         'panel.show': 'Show',
         'panel.hide': 'Hide',
-        'panel.hint.keep': 'A kept tool stays available while the network is off. Tools not listed here are hidden.',
-        'panel.hint.global': 'The per-task list lives in the caret beside the composer toggle.',
+        'panel.hint.keep': 'A kept tool stays available while the network is off; everything else is hidden. The list is complete: turning one off removes it.',
+        'panel.hint.global': 'This list covers every task. The per-task list lives in the caret beside the composer toggle.',
         'panel.hint.session': 'Only this task is affected; other tasks keep their own switch.',
         'panel.hint.readonly': 'This profile cannot save configuration, so changes last until the app restarts.',
         'panel.note.saved': 'Saved.',
@@ -170,6 +215,14 @@ window.__ModuleLoader__.load({
         'panel.stateOn': '已联网：完整工具列表可用。',
         'panel.sessionKeep': '本任务额外保留的工具',
         'panel.globalKeep': '所有任务额外保留的工具',
+        'panel.sessionTools': '本任务保留的工具',
+        'panel.globalTools': '所有任务保留的工具',
+        'panel.filter': '筛选工具',
+        'panel.noTools': '没有匹配的工具。',
+        'panel.keep': '保留',
+        'panel.drop': '隐藏',
+        'panel.builtIn': '内置',
+        'panel.alwaysOn': '始终显示',
         'panel.add': '添加',
         'panel.placeholder': '工具名，例如 read',
         'panel.empty': '还没有额外保留的工具。',
@@ -180,8 +233,8 @@ window.__ModuleLoader__.load({
         'panel.surface.composer': '输入框开关旁的小箭头',
         'panel.show': '显示',
         'panel.hide': '隐藏',
-        'panel.hint.keep': '保留名单里的工具在断网时依然可用；没列出来的工具一律隐藏。',
-        'panel.hint.global': '按任务设置的白名单在输入框开关旁的小箭头里。',
+        'panel.hint.keep': '保留的工具在断网时依然可用，其余一律隐藏。这份名单是完整的：关掉一个就等于把它移出名单。',
+        'panel.hint.global': '这里是所有任务共用的名单；单个任务的名单在输入框开关旁的小箭头里。',
         'panel.hint.session': '只影响本任务，其他任务各有各的开关。',
         'panel.hint.readonly': '这个 profile 不能保存配置，改动在应用重启后失效。',
         'panel.note.saved': '已保存。',
@@ -231,6 +284,26 @@ window.__ModuleLoader__.load({
       try {
         const parsed = JSON.parse(matched[1])
         if (parsed === null || typeof parsed !== 'object') return undefined
+        return parsed
+      } catch (error) {
+        return undefined
+      }
+    }
+
+    /**
+     * Read the tool catalogue the Host appends to `tools` results.
+     * @param text - the command result text.
+     * @returns `{ tools }` with one row per tool, or undefined when absent.
+     */
+    const parseTools = (text) => {
+      if (typeof text !== 'string') return undefined
+      // The catalogue JSON sits before the [web-state] marker, so it is matched by shape
+      // (compact JSON has no spaces) instead of by end-of-string.
+      const matched = /\[web-tools\](\{[^\s]*\})/.exec(text)
+      if (matched === null) return undefined
+      try {
+        const parsed = JSON.parse(matched[1])
+        if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.tools)) return undefined
         return parsed
       } catch (error) {
         return undefined
@@ -401,45 +474,45 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * The shared panel body. It renders the same controls in the composer popover
-       * (`mode: 'session'`) and on the two configuration pages (`mode: 'global'`);
-       * a page whose configuration hides it renders null instead.
-       * @param props - `t`, `mode`, `state`, `busy`, `error`, `note`, `onRun`.
+       * The shared panel body, drawn both in the composer popover (`mode: 'session'`)
+       * and on the two configuration pages (`mode: 'global'`). Both show every tool the
+       * Host knows with its own switch; the popover edits this Session's layer, the pages
+       * edit the global one. The appearance switches sit at the bottom, where the page has
+       * room for them.
+       * @param props - `t`, `mode`, `state`, `catalogue`, `busy`, `error`, `note`, `onRun`.
        */
       function PanelView(props) {
         const t = props.t
         const state = props.state
         const global = props.mode === 'global'
-        const [draft, setDraft] = useState('')
+        const [filter, setFilter] = useState('')
         const disabled = props.busy === true
         const writable = state === null || state === undefined ? true : state.writable !== false
-        const surfaces = state?.surfaces ?? { plugin: true, settings: true, composer: true }
-        const keep = global ? state?.global ?? [] : state?.session ?? []
-
-        const submit = () => {
-          const name = draft.trim()
-          if (name === '') return
-          const done = props.onRun(`allow add ${name}${global ? ' --global' : ''}`)
-          setDraft('')
-          if (done && typeof done.then === 'function') done.then(() => undefined)
-        }
+        const surfaces = state?.surfaces ?? liveSurfaces
+        const catalogue = Array.isArray(props.catalogue) ? props.catalogue : []
+        const kept = new Set(global ? state?.global ?? [] : state?.session ?? [])
+        const needle = filter.trim().toLowerCase()
+        const rows = catalogue.filter((entry) => needle === '' || String(entry.name).toLowerCase().includes(needle))
+        const scopeFlag = global ? ' --global' : ''
 
         const surfaceRow = (key, labelKey) =>
           h(
             'div',
             { className: 'dswt-row', key },
             h('span', null, t(labelKey)),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dswt-btn',
-                disabled,
-                'aria-pressed': surfaces[key] ? 'true' : 'false',
-                onClick: () => props.onRun(`surface ${key} ${surfaces[key] ? 'off' : 'on'}`),
-              },
-              surfaces[key] ? t('panel.hide') : t('panel.show'),
-            ),
+            key === 'plugin'
+              ? h('span', { className: 'dswt-hint' }, t('panel.alwaysOn'))
+              : h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dswt-btn',
+                    disabled,
+                    'aria-pressed': surfaces[key] ? 'true' : 'false',
+                    onClick: () => props.onRun(`surface ${key} ${surfaces[key] ? 'off' : 'on'}`),
+                  },
+                  surfaces[key] ? t('panel.hide') : t('panel.show'),
+                ),
           )
 
         return h(
@@ -464,64 +537,57 @@ window.__ModuleLoader__.load({
                   state?.off ? t('panel.switchOn') : t('panel.switchOff'),
                 ),
               ),
-          global
-            ? h(
-                'div',
-                { className: 'dswt-section' },
-                h('div', { className: 'dswt-section-title' }, t('panel.surfaceTitle')),
-                surfaceRow('plugin', 'panel.surface.plugin'),
-                surfaceRow('settings', 'panel.surface.settings'),
-                surfaceRow('composer', 'panel.surface.composer'),
-              )
-            : null,
           h(
             'div',
             { className: 'dswt-section' },
-            h('div', { className: 'dswt-section-title' }, global ? t('panel.globalKeep') : t('panel.sessionKeep')),
-            keep.length === 0
-              ? h('div', { className: 'dswt-hint' }, t('panel.empty'))
+            h('div', { className: 'dswt-section-title' }, global ? t('panel.globalTools') : t('panel.sessionTools')),
+            h('input', {
+              className: 'dswt-input',
+              value: filter,
+              placeholder: t('panel.filter'),
+              spellCheck: false,
+              disabled,
+              onChange: (event) => setFilter(event.target.value),
+            }),
+            rows.length === 0
+              ? h('div', { className: 'dswt-hint' }, t('panel.noTools'))
               : h(
                   'div',
-                  { className: 'dswt-chips' },
-                  keep.map((name) =>
+                  { className: 'dswt-tools' },
+                  rows.map((entry) =>
                     h(
-                      'span',
-                      { className: 'dswt-chip', key: name },
-                      name,
+                      'div',
+                      { className: 'dswt-row dswt-tool', key: entry.name },
+                      h(
+                        'span',
+                        { className: 'dswt-tool-name', title: entry.name },
+                        entry.name,
+                        entry.builtIn === true ? h('span', { className: 'dswt-badge' }, t('panel.builtIn')) : null,
+                      ),
                       h(
                         'button',
                         {
                           type: 'button',
-                          title: format(t('panel.remove'), { name }),
-                          'aria-label': format(t('panel.remove'), { name }),
+                          className: 'dswt-btn',
+                          'data-on': kept.has(entry.name) ? 'true' : 'false',
                           disabled,
-                          onClick: () => props.onRun(`allow remove ${name}${global ? ' --global' : ''}`),
+                          'aria-pressed': kept.has(entry.name) ? 'true' : 'false',
+                          onClick: () => props.onRun(`keep ${entry.name} ${kept.has(entry.name) ? 'off' : 'on'}${scopeFlag}`),
                         },
-                        '×',
+                        kept.has(entry.name) ? t('panel.keep') : t('panel.drop'),
                       ),
                     ),
                   ),
                 ),
-            h(
-              'div',
-              { className: 'dswt-add' },
-              h('input', {
-                className: 'dswt-input',
-                value: draft,
-                placeholder: t('panel.placeholder'),
-                spellCheck: false,
-                disabled,
-                onChange: (event) => setDraft(event.target.value),
-                onKeyDown: (event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    submit()
-                  }
-                },
-              }),
-              h('button', { type: 'button', className: 'dswt-btn', disabled: disabled || draft.trim() === '', onClick: submit }, t('panel.add')),
-            ),
             h('div', { className: 'dswt-hint' }, t('panel.hint.keep')),
+          ),
+          h(
+            'div',
+            { className: 'dswt-section' },
+            h('div', { className: 'dswt-section-title' }, t('panel.surfaceTitle')),
+            surfaceRow('plugin', 'panel.surface.plugin'),
+            surfaceRow('settings', 'panel.surface.settings'),
+            surfaceRow('composer', 'panel.surface.composer'),
           ),
           h('div', { className: 'dswt-hint' }, global ? t('panel.hint.global') : t('panel.hint.session')),
           writable ? null : h('div', { className: 'dswt-hint dswt-error' }, t('panel.hint.readonly')),
@@ -548,6 +614,11 @@ window.__ModuleLoader__.load({
         const [panelNote, setPanelNote] = useState(null)
         const [panelError, setPanelError] = useState(null)
         const [anchor, setAnchor] = useState(null)
+        // The catalogue the popover lists: asked for when the panel opens, refreshed after
+        // every edit so the switches keep matching what the Host actually keeps.
+        const [catalogue, setCatalogue] = useState([])
+        // A local mirror of the published surfaces, so hiding the caret re-renders at once.
+        const [surfaces, setSurfaces] = useState({ ...liveSurfaces })
         const rootRef = useRef(null)
         const caretRef = useRef(null)
         const aliveRef = useRef(true)
@@ -557,6 +628,15 @@ window.__ModuleLoader__.load({
           aliveRef.current = true
           return () => {
             aliveRef.current = false
+          }
+        }, [])
+
+        // Follow the surfaces the configuration publishes, wherever they were published.
+        useEffect(() => {
+          const watcher = () => setSurfaces({ ...liveSurfaces })
+          surfaceWatchers.add(watcher)
+          return () => {
+            surfaceWatchers.delete(watcher)
           }
         }, [])
 
@@ -726,6 +806,19 @@ window.__ModuleLoader__.load({
           invoke(off ? 'on' : 'off')
         }
 
+        /** Ask the Host for the catalogue and fold its state into the panel. */
+        const loadCatalogue = async () => {
+          const outcome = await run(sessionId, 'tools', t)
+          if (!aliveRef.current) return outcome
+          if (outcome.state !== undefined) {
+            setPanel(outcome.state)
+            publishSurfaces(outcome.state.surfaces)
+          }
+          const parsed = parseTools(outcome.text)
+          if (parsed !== undefined) setCatalogue(parsed.tools)
+          return outcome
+        }
+
         /** Run one panel command, keeping the panel's own progress and messages. */
         const panelRun = async (rawInput) => {
           if (sessionId === undefined) {
@@ -737,37 +830,51 @@ window.__ModuleLoader__.load({
           setPanelNote(null)
           const outcome = await run(sessionId, rawInput, t)
           if (!aliveRef.current) return false
-          setPanelBusy(false)
           if (outcome.off !== undefined) commit(outcome.off)
-          if (outcome.state !== undefined) setPanel(outcome.state)
+          if (outcome.state !== undefined) {
+            setPanel(outcome.state)
+            publishSurfaces(outcome.state.surfaces)
+          }
           if (!outcome.ok) {
+            setPanelBusy(false)
             setPanelError(outcome.text)
             return false
           }
+          // A keep edit changes the list the switches draw; ask again before settling.
+          await loadCatalogue()
+          if (!aliveRef.current) return false
+          setPanelBusy(false)
           setPanelNote(t('panel.note.saved'))
           return true
         }
 
-        /** Open the popover, asking the Host once for the state it should show. */
+        /** Open the popover, asking the Host for the state and the catalogue it draws. */
         const openPanel = () => {
           const next = !open
           setOpen(next)
           if (!next) return
           setPanelError(null)
-          if (panel !== null) return
+          if (panel !== null && catalogue.length > 0) return
           setPanelBusy(true)
-          run(sessionId, 'status', t).then((outcome) => {
+          Promise.all([run(sessionId, 'status', t), run(sessionId, 'tools', t)]).then(([status, tools]) => {
             if (!aliveRef.current) return
             setPanelBusy(false)
-            if (outcome.state !== undefined) setPanel(outcome.state)
-            if (!outcome.ok) setPanelError(outcome.text)
+            const reported = status.state ?? tools.state
+            if (reported !== undefined) {
+              setPanel(reported)
+              publishSurfaces(reported.surfaces)
+            }
+            const parsed = parseTools(tools.text)
+            if (parsed !== undefined) setCatalogue(parsed.tools)
+            if (!status.ok) setPanelError(status.text)
+            else if (!tools.ok) setPanelError(tools.text)
           })
         }
 
         const title = running ? t('title.running') : off ? t('title.off') : t('title.on')
-        // The caret and the popover follow the configuration; a hidden caret means the
-        // configuration page owns this Session's list.
-        const showCaret = panel === null || panel.surfaces === undefined ? true : panel.surfaces.composer !== false
+        // The caret follows the configuration; hiding it hands this Session's list to the
+        // configuration pages, which stay reachable either way.
+        const showCaret = surfaces.composer !== false
 
         return h(
           'div',
@@ -814,6 +921,7 @@ window.__ModuleLoader__.load({
                   t,
                   mode: 'session',
                   state: panel,
+                  catalogue,
                   busy: panelBusy,
                   error: panelError,
                   note: panelNote,
@@ -851,6 +959,7 @@ window.__ModuleLoader__.load({
         const [busy, setBusy] = useState(false)
         const [error, setError] = useState(null)
         const [note, setNote] = useState(null)
+        const [catalogue, setCatalogue] = useState([])
         const aliveRef = useRef(true)
 
         useEffect(() => {
@@ -860,15 +969,22 @@ window.__ModuleLoader__.load({
           }
         }, [])
 
-        // One `status` on mount gives the page the configuration it draws.
+        // One `status` and one `tools` on mount give the page the configuration and the
+        // catalogue it draws.
         useEffect(() => {
           let cancelled = false
           setBusy(true)
-          run('status', t).then((outcome) => {
+          Promise.all([run('status', t), run('tools', t)]).then(([status, tools]) => {
             if (cancelled || !aliveRef.current) return
             setBusy(false)
-            if (outcome.state !== undefined) setState(outcome.state)
-            if (!outcome.ok) setError(outcome.text)
+            const reported = status.state ?? tools.state
+            if (reported !== undefined) {
+              setState(reported)
+              publishSurfaces(reported.surfaces)
+            }
+            const parsed = parseTools(tools.text)
+            if (parsed !== undefined) setCatalogue(parsed.tools)
+            if (!status.ok) setError(status.text)
           })
           return () => {
             cancelled = true
@@ -881,22 +997,32 @@ window.__ModuleLoader__.load({
           setNote(null)
           const outcome = await run(rawInput, t)
           if (!aliveRef.current) return false
-          setBusy(false)
-          if (outcome.state !== undefined) setState(outcome.state)
+          if (outcome.state !== undefined) {
+            setState(outcome.state)
+            publishSurfaces(outcome.state.surfaces)
+          }
           if (!outcome.ok) {
+            setBusy(false)
             setError(outcome.text)
             return false
           }
+          const tools = await run('tools', t)
+          if (!aliveRef.current) return false
+          const parsed = parseTools(tools.text)
+          if (parsed !== undefined) setCatalogue(parsed.tools)
+          setBusy(false)
           setNote(t('panel.note.saved'))
           return true
         }
 
-        const hidden = state !== null && state.surfaces !== undefined && state.surfaces[surface] === false
-        if (hidden) return null
+        // A hidden surface is unmounted by `apply`, never drawn: rendering nothing would
+        // still leave an empty entry in the sidebar.
+        if (liveSurfaces[surface] === false) return null
         return h(ui.PanelView, {
           t,
           mode: 'global',
           state,
+          catalogue,
           busy,
           error,
           note,
@@ -933,56 +1059,106 @@ window.__ModuleLoader__.load({
         const pluginPage = createPage(ctx, ui, 'plugin')
         const settingsPage = createPage(ctx, ui, 'settings')
 
-        // Composer: the toggle, its caret, and the Session popover.
-        ctx.slots.inject('conversation.input.left', () =>
-          ctx.slots.register(
-            {
-              name: 'conversation.input.left',
-              id: 'web-toggle',
-              order: 11,
-              locale: NS,
-              label: () => t('group.aria'),
-            },
-            ui.WebToggle,
-          ),
-        )
+        // Slots are mounted on demand: a surface the configuration hides must leave no
+        // empty entry behind, so "hidden" means the registration itself goes away.
+        const mounts = { composer: null, plugin: null, settings: null }
 
-        // Configuration page on this bundle's detail page.
-        ctx.slots.inject('plugins.detail.section', () =>
-          ctx.slots.register(
-            {
-              name: 'plugins.detail.section',
-              id: 'web-toggle',
-              order: 20,
-              locale: NS,
-            },
-            (props) => {
-              const pkg = props?.subject?.pkg
-              if (pkg === undefined || pkg === null || pkg.name !== 'dsh-web-toggle') return null
-              return h(pluginPage, props)
-            },
-          ),
-        )
+        /** Turn a Cordis effect handle into a function that always disposes it. */
+        const disposeOf = (handle) => {
+          if (typeof handle === 'function') return handle
+          if (handle !== null && typeof handle === 'object' && typeof handle.dispose === 'function') return () => handle.dispose()
+          return () => {}
+        }
 
-        // The sidebar glyph for the section above; the shell keeps its generic gear
-        // unless an icon is registered under the same id.
-        ctx.slots.inject('settings.section.icon', () =>
-          ctx.slots.register({ name: 'settings.section.icon', id: 'web-toggle' }, SectionIcon),
-        )
+        /** Mount or unmount one slot so it matches `wanted`. */
+        const syncSlot = (key, wanted, label, mount) => {
+          if (wanted === true && mounts[key] === null) mounts[key] = disposeOf(ctx.effect(mount, label))
+          if (wanted !== true && mounts[key] !== null) {
+            const dispose = mounts[key]
+            mounts[key] = null
+            dispose()
+          }
+        }
 
-        // Configuration page in the settings sidebar.
-        ctx.slots.inject('settings.section', () =>
-          ctx.slots.register(
-            {
-              name: 'settings.section',
-              id: 'web-toggle',
-              order: 60,
-              locale: NS,
-              label: () => t('settings.title'),
-            },
-            settingsPage,
-          ),
+        /** Re-sync every optional slot with the published surfaces. */
+        const syncSlots = () => {
+          // Composer: the toggle, its caret, and the Session popover.
+          syncSlot('composer', liveSurfaces.composer !== false, 'web-toggle: composer slot', () =>
+            ctx.slots.inject('conversation.input.left', () =>
+              ctx.slots.register(
+                {
+                  name: 'conversation.input.left',
+                  id: 'web-toggle',
+                  order: 11,
+                  locale: NS,
+                  label: () => t('group.aria'),
+                },
+                ui.WebToggle,
+              ),
+            ),
+          )
+
+          // This bundle's detail page. It is the guaranteed entry and never unmounts:
+          // the other two surfaces can be hidden, this one is how they come back.
+          syncSlot('plugin', true, 'web-toggle: detail slot', () =>
+            ctx.slots.inject('plugins.detail.section', () =>
+              ctx.slots.register(
+                {
+                  name: 'plugins.detail.section',
+                  id: 'web-toggle',
+                  order: 20,
+                  locale: NS,
+                },
+                (props) => {
+                  const pkg = props?.subject?.pkg
+                  if (pkg === undefined || pkg === null || pkg.name !== 'dsh-web-toggle') return null
+                  return h(pluginPage, props)
+                },
+              ),
+            ),
+          )
+
+          // Settings sidebar: the page and its glyph go together.
+          syncSlot('settings', liveSurfaces.settings !== false, 'web-toggle: settings slot', () => {
+            const stopPage = disposeOf(
+              ctx.effect(
+                () =>
+                  ctx.slots.inject('settings.section', () =>
+                    ctx.slots.register(
+                      {
+                        name: 'settings.section',
+                        id: 'web-toggle',
+                        order: 60,
+                        locale: NS,
+                        label: () => t('settings.title'),
+                      },
+                      settingsPage,
+                    ),
+                  ),
+                'web-toggle: settings section',
+              ),
+            )
+            const stopIcon = disposeOf(
+              ctx.effect(
+                () => ctx.slots.inject('settings.section.icon', () => ctx.slots.register({ name: 'settings.section.icon', id: 'web-toggle' }, SectionIcon)),
+                'web-toggle: settings icon',
+              ),
+            )
+            return () => {
+              stopPage()
+              stopIcon()
+            }
+          })
+        }
+
+        surfaceWatchers.add(syncSlots)
+        ctx.effect(
+          () => () => {
+            surfaceWatchers.delete(syncSlots)
+          },
+          'web-toggle: surface watcher',
         )
+        syncSlots()
       },
     }
   },

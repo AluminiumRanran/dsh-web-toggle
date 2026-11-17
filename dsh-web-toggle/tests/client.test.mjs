@@ -130,11 +130,15 @@ const page = (() => {
     slots: {
       inject(name, factory) {
         assert.ok(typeof name === 'string' && name.length > 0, 'inject 需要槽位名')
-        factory()
+        // 真实 inject 返回 factory 的结果（即槽位的卸载函数），effect 把它当成清理逻辑。
+        return factory()
       },
       register(definition, component) {
         state.slots[definition.name] = { definition, component }
-        return () => {}
+        // 真实的 slots.register 返回卸载函数：入口关闭后槽位必须真的消失。
+        return () => {
+          if (state.slots[definition.name]?.component === component) delete state.slots[definition.name]
+        }
       },
     },
     effect(run, label) {
@@ -214,6 +218,18 @@ function fakeHost(initial = {}) {
     ...initial,
   }
   state.calls = []
+  // The catalogue the panel draws, and the list a scope keeps out of the box.
+  const CATALOGUE = ['bash', 'grep', 'ops_bash', 'read', 'web_fetch', 'web_search', 'write']
+  const BUILT_IN = ['ops_bash', 'read', 'write']
+  const DEFAULT_KEPT = ['ops_bash', 'read']
+  const effective = () => (state.session.length > 0 ? state.session : state.global.length > 0 ? state.global : DEFAULT_KEPT)
+  const catalogue = () => {
+    const kept = effective()
+    return {
+      source: state.session.length > 0 ? 'session' : state.global.length > 0 ? 'global' : 'default',
+      tools: [...CATALOGUE].sort().map((name) => ({ name, kept: kept.includes(name), builtIn: BUILT_IN.includes(name) })),
+    }
+  }
   const push = (list, name) => {
     if (!list.includes(name)) list.push(name)
   }
@@ -227,7 +243,17 @@ function fakeHost(initial = {}) {
     if (head === 'off') state.off = true
     else if (head === 'on') state.off = false
     else if (head === 'surface') state.surfaces[rest[0]] = rest[1] === 'on'
-    else if (head === 'allow') {
+    else if (head === 'keep') {
+      const [name, value] = rest
+      const global = rest.includes('--global')
+      const list = global ? state.global : state.session
+      if (rest[0] === 'reset') list.length = 0
+      else if (name !== undefined) {
+        if (list.length === 0) list.push(...effective())
+        if (value === 'on') push(list, name)
+        else if (value === 'off') drop(list, name)
+      }
+    } else if (head === 'allow') {
       const verb = rest[0]
       const global = rest.includes('--global')
       const list = global ? state.global : state.session
@@ -253,7 +279,10 @@ function fakeHost(initial = {}) {
           state.calls.push([sessionId, line])
           apply(line)
           const marker = `[web:${state.off ? 'off' : 'on'}]`
-          return { ok: true, value: { result: { kind: 'success', text: `ok ${marker} [web-state]${JSON.stringify(view())}` } } }
+          const catalogueMarker = line === '/webtoggle tools' || line.startsWith('/webtoggle keep') || line.startsWith('/webtoggle surface')
+            ? ` [web-tools]${JSON.stringify(catalogue())}`
+            : ''
+          return { ok: true, value: { result: { kind: 'success', text: `ok${catalogueMarker} ${marker} [web-state]${JSON.stringify(view())}` } } }
         },
       },
     },
@@ -279,6 +308,15 @@ function textOf(node) {
 function buttonWith(node, text) {
   return queryAll(node, 'dswt-btn').find((button) => textOf(button).trim() === text)
 }
+/** 最近一次发给宿主的那条命令（面板操作后会紧跟一次 tools 取目录）。 */
+const lastCommand = (host, expected) => {
+  const lines = host.state.calls.map(([, line]) => line)
+  return expected === undefined ? lines.at(-1) : lines.includes(expected)
+}
+
+/** 面板里名字为 name 的那一行工具。 */
+const toolRow = (tree, name) => queryAll(tree, 'dswt-tool').find((row) => queryAll(row, 'dswt-tool-name')[0]?.children?.[0] === name)
+
 /** 工具行里的提示（可能不存在）。 */
 function noteOf(tree) {
   return queryAll(tree, 'dswt-note')[0]
@@ -493,7 +531,7 @@ function expand(node) {
   console.log('8 挂载探针纠正 ok')
 }
 
-// ---- 9. 小箭头：点开面板、面板里的按钮落回命令线 -------------------------
+// ---- 9. 小箭头：点开面板、逐个开关工具 -------------------------
 {
   storages.clear()
   const host = fakeHost()
@@ -505,8 +543,9 @@ function expand(node) {
   assert.equal(caret.props['aria-expanded'], 'false')
   caret.props.onClick()
   await settle()
-  assert.equal(host.state.calls[0][1], '/webtoggle status', '打开时应问一次宿主')
-  // 第一次渲染跑定位 effect，第二次才画在算好的坐标上（真实 React 是自动的）
+  assert.ok(lastCommand(host, '/webtoggle status'), '打开时应问一次宿主状态')
+  assert.ok(lastCommand(host, '/webtoggle tools'), '打开时应取一次工具目录')
+  tree = render()
   tree = render()
   tree = render()
   const panels = queryAll(tree, 'dswt-panel')
@@ -516,29 +555,46 @@ function expand(node) {
   // 面板上的「断网」
   buttonWith(tree, t('panel.switchOff')).props.onClick()
   await settle()
-  assert.equal(host.state.calls.at(-1)[1], '/webtoggle off')
+  assert.ok(lastCommand(host, '/webtoggle off'), '面板里的开关也走命令线')
   tree = render()
   assert.equal(tree.props['data-off'], 'true', '面板操作也应更新开关')
 
-  // 添加一个本会话工具
-  const input = queryAll(tree, 'dswt-input')[0]
-  input.props.onChange({ target: { value: 'read' } })
+  // 目录里每个工具一行开关：点一下就把 web_search 收进本会话名单
   tree = render()
-  buttonWith(tree, t('panel.add')).props.onClick()
+  tree = render()
+  const row = toolRow(tree, 'web_search')
+  assert.ok(row !== undefined, '目录里应有 web_search 这一行')
+  const toggle = queryAll(row, 'dswt-btn')[0]
+  assert.equal(toggle.props['data-on'], 'false', '默认不保留它')
+  toggle.props.onClick()
   await settle()
-  assert.equal(host.state.calls.at(-1)[1], '/webtoggle allow add read')
+  assert.ok(lastCommand(host, '/webtoggle keep web_search on'), '开关要带工具名与方向')
+  assert.ok(host.state.session.includes('web_search'), '宿主那边的名单要变')
   tree = render()
-  assert.deepEqual(host.state.session, ['read'])
-  assert.equal(queryAll(tree, 'dswt-chip')[0].children[0], 'read')
+  tree = render()
+  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-on'], 'true', '回执后开关要跟着变')
 
-  // 再删掉
-  const chipButton = queryAll(tree, 'dswt-chip')[0].children[1]
-  chipButton.props.onClick()
+  // 再点一下：移出名单
+  queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props.onClick()
   await settle()
-  assert.equal(host.state.calls.at(-1)[1], '/webtoggle allow remove read')
+  assert.ok(lastCommand(host, '/webtoggle keep web_search off'))
+  assert.ok(!host.state.session.includes('web_search'))
   tree = render()
-  assert.equal(queryAll(tree, 'dswt-chip').length, 0)
-  console.log('9 浮层面板 ok')
+  tree = render()
+  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-on'], 'false')
+
+  // 筛选框只影响列表，不发命令
+  const before = host.state.calls.length
+  const filter = queryAll(tree, 'dswt-input').find((input) => input.props.placeholder === t('panel.filter'))
+  filter.props.onChange({ target: { value: 'web' } })
+  tree = render()
+  assert.equal(queryAll(tree, 'dswt-tool').length, 2, '只剩两个 web_* 工具')
+  assert.equal(host.state.calls.length, before, '筛选不该惊动宿主')
+  filter.props.onChange({ target: { value: 'zzz' } })
+  tree = render()
+  assert.equal(queryAll(tree, 'dswt-tool').length, 0)
+  assert.equal(textOf(queryAll(tree, 'dswt-hint').find((hint) => textOf(hint) === t('panel.noTools'))), t('panel.noTools'))
+  console.log('9 浮层面板与工具开关 ok')
 }
 
 // ---- 10. 小箭头按配置隐藏 ------------------------------------------------
@@ -562,17 +618,20 @@ function expand(node) {
 // ---- 11. 设置页：全局面板，改的是配置而不是本会话状态 --------------------
 {
   storages.clear()
-  const host = fakeHost({ global: ['read'] })
+  const host = fakeHost({ global: ['read', 'grep'] })
   page.state.remote = host.remote
   const { render, t } = mountPage('settings.section')
   let tree = render()
   await settle()
   tree = render()
-  assert.equal(host.state.calls[0][1], '/webtoggle status')
+  tree = render()
+  assert.ok(lastCommand(host, '/webtoggle status'), '页面挂载时要问宿主状态')
+  assert.ok(lastCommand(host, '/webtoggle tools'), '页面挂载时要取工具目录')
   const panels = queryAll(tree, 'dswt-panel')
   assert.equal(panels.length, 1)
   assert.equal(panels[0].props['data-inline'], 'true', '页面里的面板应是内联的')
-  assert.equal(queryAll(tree, 'dswt-chip')[0].children[0], 'read', '应显示全局保留的工具')
+  assert.equal(queryAll(toolRow(tree, 'read'), 'dswt-btn')[0].props['data-on'], 'true', '应显示全局保留的工具')
+  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-on'], 'false', '没保留的要显示为关')
   assert.equal(buttonWith(tree, t('panel.switchOff')), undefined, '全局面板不显示本会话开关')
 
   // 点「隐藏」改设置页自身
@@ -580,25 +639,31 @@ function expand(node) {
   assert.ok(row !== undefined, '应有设置页那一行')
   buttonWith(row, t('panel.hide')).props.onClick()
   await settle()
-  assert.equal(host.state.calls.at(-1)[1], '/webtoggle surface settings off')
+  assert.ok(lastCommand(host, '/webtoggle surface settings off'))
   tree = render()
   assert.equal(tree, null, '关掉之后这个页面自己也不画了')
 
-  // 关掉之后要用别处再打开；新开一个宿主，模拟换个入口重新显示
-  const reopened = fakeHost({ global: ['read', 'grep'] })
+  // 换个入口把它重新打开：输入框那边取一次状态，页面就跟着回来
+  const reopened = fakeHost({ global: ['ops_bash'] })
   page.state.remote = reopened.remote
+  const composerAgain = mount('s11')
+  const composerTree = composerAgain.render()
+  queryAll(composerTree, 'dswt-caret')[0].props.onClick()
+  await settle()
   const again = mountPage('settings.section')
-  let page_tree = again.render()
+  let pageTree = again.render()
   await settle()
-  page_tree = again.render()
-  assert.equal(queryAll(page_tree, 'dswt-panel').length, 1, '配置允许时应画回来')
-  const input = queryAll(page_tree, 'dswt-input')[0]
-  input.props.onChange({ target: { value: 'bash' } })
-  page_tree = again.render()
-  buttonWith(page_tree, t('panel.add')).props.onClick()
+  pageTree = again.render()
+  pageTree = again.render()
+  assert.equal(queryAll(pageTree, 'dswt-panel').length, 1, '配置允许时应画回来')
+
+  // 全局长名单：点一下 bash 就写进 globalTools（命令带 --global）
+  const bashRow = toolRow(pageTree, 'bash')
+  assert.ok(bashRow !== undefined, '目录里应有 bash')
+  queryAll(bashRow, 'dswt-btn')[0].props.onClick()
   await settle()
-  assert.equal(reopened.state.calls.at(-1)[1], '/webtoggle allow add bash --global')
-  assert.deepEqual(reopened.state.global, ['read', 'grep', 'bash'])
+  assert.ok(lastCommand(reopened, '/webtoggle keep bash on --global'), '全局面板要带 --global')
+  assert.ok(reopened.state.global.includes('bash'))
   console.log('11 设置页面板 ok')
 }
 
@@ -636,6 +701,35 @@ function expand(node) {
   tree = broken.render()
   assert.equal(textOf(queryAll(tree, 'dswt-error')[0]), t('error.noRemote'))
   console.log('13 配置页失败提示 ok')
+}
+
+// ---- 14. 关掉一个入口＝真的卸载槽位，详情页永远在 -----------------------
+{
+  storages.clear()
+  const host = fakeHost({ surfaces: { plugin: true, settings: true, composer: false } })
+  page.state.remote = host.remote
+  const instance = mount('s14')
+  let tree = instance.render()
+  assert.ok(queryAll(tree, 'dswt-trigger').length === 1, '状态未知时先按显示处理')
+  // 取回宿主状态后，输入框的槽位应当整条卸载（不只是内容变空）
+  queryAll(tree, 'dswt-caret')[0].props.onClick()
+  await settle()
+  assert.equal(page.state.slots['conversation.input.left'], undefined, '关掉后整个槽位要卸载')
+  assert.ok(page.state.slots['plugins.detail.section'] !== undefined, '详情页是保底入口，永远在')
+  assert.ok(page.state.slots['settings.section'] !== undefined, '设置页仍在')
+
+  // 从设置页把它重新打开：槽位要装回来
+  const settingsPage = mountPage('settings.section')
+  tree = settingsPage.render()
+  await settle()
+  tree = settingsPage.render()
+  tree = settingsPage.render()
+  const row = queryAll(tree, 'dswt-row').find((item) => textOf(item).includes(page.t('panel.surface.composer')))
+  assert.ok(row !== undefined, '设置页应能改小箭头的显示')
+  buttonWith(row, page.t('panel.show')).props.onClick()
+  await settle()
+  assert.ok(page.state.slots['conversation.input.left'] !== undefined, '打开后槽位要回来')
+  console.log('14 入口真卸载 / 详情页常开 ok')
 }
 
 console.log('\n全部通过')
