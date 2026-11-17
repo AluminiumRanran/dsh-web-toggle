@@ -22,6 +22,9 @@ const samePackage = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'
 assert.equal(samePackage, 'dsh-web-toggle', '目标目录不是本包，拒绝覆盖')
 
 const files = [
+  // The manifest too: it carries the version the shell shows and the export map it
+  // resolves, so a stale copy keeps reporting the previous release.
+  ['package.json', 'package.json'],
   ['index.js', 'index.js'],
   ['client.js', 'client.js'],
   ['cordis.patch.yml', 'cordis.patch.yml'],
