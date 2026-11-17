@@ -117,7 +117,9 @@ window.__ModuleLoader__.load({
 .dswt-tool{padding:1px 0}
 .dswt-tool-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:11px;display:inline-flex;align-items:center;gap:4px}
 .dswt-badge{font-family:inherit;font-size:10px;padding:0 4px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14));color:var(--dsw-alias-label-secondary);line-height:14px}
-.dswt-btn[data-on="true"]{border-color:transparent;background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16))}
+.dswt-btn[data-mode="keep"]{color:var(--dsw-alias-state-success-primary,#2f9e44)}
+.dswt-btn[data-mode="inspect"]{color:var(--dsw-alias-state-warning-primary,#e8590c)}
+.dswt-btn[data-mode="hide"]{opacity:.72}
 .dswt-add{display:flex;gap:6px;align-items:center}
 .dswt-input{flex:1;min-width:0;height:26px;padding:0 7px;border-radius:6px;border:1px solid var(--dsw-alias-border-neutral,rgba(127,127,127,.35));background:var(--dsw-alias-bg-base,transparent);color:inherit;font:inherit}
 .dswt-input:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary))}
@@ -155,17 +157,19 @@ window.__ModuleLoader__.load({
         'panel.thisTask': 'This task',
         'panel.switchOff': 'Cut the network',
         'panel.switchOn': 'Restore the network',
-        'panel.stateOff': 'Off: internet-facing tools are hidden, and shell commands that would fetch anything are refused.',
+        'panel.stateOff': 'Off: hidden tools are gone, inspected ones stay but every call is checked.',
         'panel.stateOn': 'On: the full tool list is available.',
         'panel.sessionKeep': 'Extra tools this task keeps',
         'panel.globalKeep': 'Extra tools every task keeps',
-        'panel.sessionTools': 'Tools this task keeps',
-        'panel.globalTools': 'Tools every task keeps',
+        'panel.sessionTools': 'Tools in this task',
+        'panel.globalTools': 'Tools for every task',
         'panel.filter': 'filter tools',
         'panel.noTools': 'No tool matches this filter.',
-        'panel.keep': 'Keep',
-        'panel.drop': 'Hide',
+        'panel.mode.keep': 'keep',
+        'panel.mode.hide': 'hide',
+        'panel.mode.inspect': 'inspect',
         'panel.builtIn': 'built-in',
+        'panel.cycle': 'Click to switch this tool to the next mode',
         'panel.alwaysOn': 'always shown',
         'panel.add': 'Add',
         'panel.placeholder': 'tool name, for example read',
@@ -177,7 +181,7 @@ window.__ModuleLoader__.load({
         'panel.surface.composer': 'Caret beside the composer toggle',
         'panel.show': 'Show',
         'panel.hide': 'Hide',
-        'panel.hint.keep': 'A kept tool stays available while the network is off; everything else is hidden. The list is complete: turning one off removes it.',
+        'panel.hint.keep': 'Every tool has one of three modes: keep it, hide it, or inspect every call. Anything not named here stays available, so the switch only takes away what it knows reaches the network.',
         'panel.hint.global': 'This list covers every task. The per-task list lives in the caret beside the composer toggle.',
         'panel.hint.session': 'Only this task is affected; other tasks keep their own switch.',
         'panel.hint.readonly': 'This profile cannot save configuration, so changes last until the app restarts.',
@@ -211,17 +215,19 @@ window.__ModuleLoader__.load({
         'panel.thisTask': '本任务',
         'panel.switchOff': '断网',
         'panel.switchOn': '恢复联网',
-        'panel.stateOff': '已断网：能出网的工具都隐藏了，shell 里的联网命令会被拦下。',
+        'panel.stateOff': '已断网：隐藏的工具不再出现，内容检查的工具保留但每次调用都会被检查。',
         'panel.stateOn': '已联网：完整工具列表可用。',
         'panel.sessionKeep': '本任务额外保留的工具',
         'panel.globalKeep': '所有任务额外保留的工具',
-        'panel.sessionTools': '本任务保留的工具',
-        'panel.globalTools': '所有任务保留的工具',
+        'panel.sessionTools': '本任务的工具',
+        'panel.globalTools': '所有任务的工具',
         'panel.filter': '筛选工具',
         'panel.noTools': '没有匹配的工具。',
-        'panel.keep': '保留',
-        'panel.drop': '隐藏',
+        'panel.mode.keep': '保留',
+        'panel.mode.hide': '隐藏',
+        'panel.mode.inspect': '内容检查',
         'panel.builtIn': '内置',
+        'panel.cycle': '点一下切到下一种模式',
         'panel.alwaysOn': '始终显示',
         'panel.add': '添加',
         'panel.placeholder': '工具名，例如 read',
@@ -233,7 +239,7 @@ window.__ModuleLoader__.load({
         'panel.surface.composer': '输入框开关旁的小箭头',
         'panel.show': '显示',
         'panel.hide': '隐藏',
-        'panel.hint.keep': '保留的工具在断网时依然可用，其余一律隐藏。这份名单是完整的：关掉一个就等于把它移出名单。',
+        'panel.hint.keep': '每个工具有三种模式：保留、隐藏、内容检查。没在本页出现的工具一律照常可用——断网只拿走它确认会联网的那些。',
         'panel.hint.global': '这里是所有任务共用的名单；单个任务的名单在输入框开关旁的小箭头里。',
         'panel.hint.session': '只影响本任务，其他任务各有各的开关。',
         'panel.hint.readonly': '这个 profile 不能保存配置，改动在应用重启后失效。',
@@ -395,6 +401,68 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M2 4l3 3 3-3', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round' }),
       )
 
+    /** Read one `on|off` token the way the Host reads it. */
+    const switchOf = (token) => {
+      const word = typeof token === 'string' ? token.toLowerCase() : ''
+      if (word === 'on' || word === 'true' || word === '1' || word === 'show' || word === 'yes') return true
+      if (word === 'off' || word === 'false' || word === '0' || word === 'hide' || word === 'no') return false
+      return undefined
+    }
+
+    /** Read one `keep|hide|inspect` token the way the Host reads it. */
+    const modeOf = (token) => {
+      const word = typeof token === 'string' ? token.toLowerCase() : ''
+      if (word === 'keep' || word === 'on' || word === 'true' || word === '1' || word === 'show' || word === 'yes') return 'keep'
+      if (word === 'hide' || word === 'off' || word === 'false' || word === '0' || word === 'drop' || word === 'no') return 'hide'
+      if (word === 'inspect' || word === 'check' || word === 'scan' || word === 'match' || word === 'pattern') return 'inspect'
+      return undefined
+    }
+
+    /**
+     * 一条命令打算做什么，从它自己的文本读出来。默认模式（debug 关闭）宿主只回
+     * 一句人话，没有机器状态可解析，于是面板按这次请求自己把界面改到位。
+     * @param rawInput - 刚发出去的参数文本。
+     * @returns `{ kind, ... }`，不是本插件的形态时回 null。
+     */
+    const planOf = (rawInput) => {
+      const [head = '', ...rest] = String(rawInput).trim().split(/\s+/)
+      const global = rest.includes('--global')
+      const tokens = rest.filter((token) => token !== '--global')
+      const action = String(tokens[0] ?? '').toLowerCase()
+      if (head === 'on' || head === 'off') return { kind: 'switch', off: head === 'off' }
+      if (head === 'surface') {
+        const value = switchOf(tokens[1])
+        if (action !== 'settings' && action !== 'composer' && action !== 'plugin') return null
+        if (value === undefined) return null
+        return { kind: 'surface', key: action, value }
+      }
+      if (head === 'mode') {
+        if (action === 'reset' || action === 'clear') return { kind: 'reset', global }
+        const name = tokens[0]
+        const next = modeOf(tokens[1])
+        if (typeof name !== 'string' || name === '' || next === undefined) return null
+        return { kind: 'mode', name, mode: next, global }
+      }
+      if (head === 'keep' || head === 'allow') {
+        // 旧写法：keep <tool> on|off / allow add|remove <tool>，都落到同一个模式上。
+        if (action === 'reset' || action === 'clear') return { kind: 'reset', global }
+        const name = head === 'keep' ? tokens[0] : tokens[1]
+        if (typeof name !== 'string' || name === '') return null
+        const next = head === 'keep' ? modeOf(tokens[1]) : ['remove', 'rm', 'del', 'delete', '-', 'off'].includes(action) ? 'hide' : 'keep'
+        if (next === undefined) return null
+        return { kind: 'mode', name, mode: next, global }
+      }
+      return null
+    }
+
+        /**
+         * The shared panel body, drawn both in the composer popover (`mode: 'session'`)
+         * and on the two configuration pages (`mode: 'global'`). Both show every tool the
+         * Host knows with its own switch; the popover edits this Session's layer, the pages
+         * edit the global one. The appearance switches sit at the bottom, where the page has
+         * room for them.
+         * @param props - `t`, `mode`, `state`, `catalogue`, `busy`, `error`, `note`, `onRun`.
+         */
     /**
      * Build the slot components over one plugin context.
      * @param ctx - the Client plugin context (carries the `remote` facade).
@@ -473,14 +541,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /**
-       * The shared panel body, drawn both in the composer popover (`mode: 'session'`)
-       * and on the two configuration pages (`mode: 'global'`). Both show every tool the
-       * Host knows with its own switch; the popover edits this Session's layer, the pages
-       * edit the global one. The appearance switches sit at the bottom, where the page has
-       * room for them.
-       * @param props - `t`, `mode`, `state`, `catalogue`, `busy`, `error`, `note`, `onRun`.
-       */
       function PanelView(props) {
         const t = props.t
         const state = props.state
@@ -490,8 +550,13 @@ window.__ModuleLoader__.load({
         const writable = state === null || state === undefined ? true : state.writable !== false
         const surfaces = state?.surfaces ?? liveSurfaces
         const catalogue = Array.isArray(props.catalogue) ? props.catalogue : []
-        const kept = new Set(global ? state?.global ?? [] : state?.session ?? [])
         const needle = filter.trim().toLowerCase()
+        // 三态循环的顺序：保留 → 隐藏 → 内容检查 → 保留。
+        const MODE_CYCLE = ['keep', 'hide', 'inspect']
+        const currentMode = (entry) => (entry.mode === 'hide' || entry.mode === 'inspect' ? entry.mode : 'keep')
+        const nextMode = (mode) => MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length]
+        const modeLabel = (mode) =>
+          t(mode === 'inspect' ? 'panel.mode.inspect' : mode === 'hide' ? 'panel.mode.hide' : 'panel.mode.keep')
         const rows = catalogue.filter((entry) => needle === '' || String(entry.name).toLowerCase().includes(needle))
         const scopeFlag = global ? ' --global' : ''
 
@@ -569,12 +634,12 @@ window.__ModuleLoader__.load({
                         {
                           type: 'button',
                           className: 'dswt-btn',
-                          'data-on': kept.has(entry.name) ? 'true' : 'false',
-                          disabled,
-                          'aria-pressed': kept.has(entry.name) ? 'true' : 'false',
-                          onClick: () => props.onRun(`keep ${entry.name} ${kept.has(entry.name) ? 'off' : 'on'}${scopeFlag}`),
+                          'data-mode': currentMode(entry),
+                          disabled: disabled || !writable,
+                          title: t('panel.cycle'),
+                          onClick: () => props.onRun(`mode ${entry.name} ${nextMode(currentMode(entry))}${scopeFlag}`),
                         },
-                        kept.has(entry.name) ? t('panel.keep') : t('panel.drop'),
+                        modeLabel(currentMode(entry)),
                       ),
                     ),
                   ),
@@ -729,6 +794,32 @@ window.__ModuleLoader__.load({
           if (sessionId !== undefined) probedSessions.add(sessionId)
         }
 
+        /** 把一条改动落到浮层的面板状态与工具目录上。 */
+        const applyPlan = (plan) => {
+          if (plan === null) return false
+          if (plan.kind === 'switch') {
+            commit(plan.off)
+            return true
+          }
+          if (plan.kind === 'surface') {
+            setPanel((current) => (current === null ? current : { ...current, surfaces: { ...current.surfaces, [plan.key]: plan.value } }))
+            publishSurfaces({ ...liveSurfaces, [plan.key]: plan.value })
+            return true
+          }
+          if (plan.kind === 'mode') {
+            setCatalogue((rows) => rows.map((row) => (row.name === plan.name ? { ...row, mode: plan.mode } : row)))
+            setPanel((current) => {
+              if (current === null) return current
+              const field = plan.global ? 'global' : 'session'
+              const table = current[field] !== null && typeof current[field] === 'object' ? { ...current[field] } : {}
+              table[plan.name] = plan.mode
+              return { ...current, [field]: table }
+            })
+            return true
+          }
+          return false
+        }
+
         /**
          * Run one `/webtoggle` form and fold the Host's answer into the button.
          * @param rawInput - `on`, `off`, `status`, or a configuration form.
@@ -803,7 +894,11 @@ window.__ModuleLoader__.load({
             fail(t('error.running'))
             return
           }
-          invoke(off ? 'on' : 'off')
+          const next = !off
+          void invoke(next ? 'off' : 'on').then((outcome) => {
+            // 默认模式里回执没有机器标记：按这次请求自己把按钮改到位。
+            if (outcome.ok && outcome.off === undefined) commit(next)
+          })
         }
 
         /** Ask the Host for the catalogue and fold its state into the panel. */
@@ -840,8 +935,9 @@ window.__ModuleLoader__.load({
             setPanelError(outcome.text)
             return false
           }
-          // A keep edit changes the list the switches draw; ask again before settling.
-          await loadCatalogue()
+          // 默认模式里回执没有机器状态，按这次请求自己把面板改到位；只有整份名单
+          // 被换掉的 reset/clear 才需要再问一次目录。
+          if (!applyPlan(planOf(rawInput))) await loadCatalogue()
           if (!aliveRef.current) return false
           setPanelBusy(false)
           setPanelNote(t('panel.note.saved'))
@@ -856,18 +952,17 @@ window.__ModuleLoader__.load({
           setPanelError(null)
           if (panel !== null && catalogue.length > 0) return
           setPanelBusy(true)
-          Promise.all([run(sessionId, 'status', t), run(sessionId, 'tools', t)]).then(([status, tools]) => {
+          // 一次 `tools` 就够：它的回执同时带状态和目录，比 status+tools 少一条聊天回执。
+          Promise.resolve(run(sessionId, 'tools', t)).then((tools) => {
             if (!aliveRef.current) return
             setPanelBusy(false)
-            const reported = status.state ?? tools.state
-            if (reported !== undefined) {
-              setPanel(reported)
-              publishSurfaces(reported.surfaces)
+            if (tools.state !== undefined) {
+              setPanel(tools.state)
+              publishSurfaces(tools.state.surfaces)
             }
             const parsed = parseTools(tools.text)
             if (parsed !== undefined) setCatalogue(parsed.tools)
-            if (!status.ok) setPanelError(status.text)
-            else if (!tools.ok) setPanelError(tools.text)
+            if (!tools.ok) setPanelError(tools.text)
           })
         }
 
@@ -974,17 +1069,16 @@ window.__ModuleLoader__.load({
         useEffect(() => {
           let cancelled = false
           setBusy(true)
-          Promise.all([run('status', t), run('tools', t)]).then(([status, tools]) => {
+          Promise.resolve(run('tools', t)).then((tools) => {
             if (cancelled || !aliveRef.current) return
             setBusy(false)
-            const reported = status.state ?? tools.state
-            if (reported !== undefined) {
-              setState(reported)
-              publishSurfaces(reported.surfaces)
+            if (tools.state !== undefined) {
+              setState(tools.state)
+              publishSurfaces(tools.state.surfaces)
             }
             const parsed = parseTools(tools.text)
             if (parsed !== undefined) setCatalogue(parsed.tools)
-            if (!status.ok) setError(status.text)
+            if (!tools.ok) setError(tools.text)
           })
           return () => {
             cancelled = true
@@ -1006,10 +1100,30 @@ window.__ModuleLoader__.load({
             setError(outcome.text)
             return false
           }
-          const tools = await run('tools', t)
-          if (!aliveRef.current) return false
-          const parsed = parseTools(tools.text)
-          if (parsed !== undefined) setCatalogue(parsed.tools)
+          // 默认模式里回执只有一句人话：配置页同样按这次请求自己改界面，只有
+          // reset/clear 这种整份名单被换掉的操作才回头重新读目录。
+          const plan = planOf(rawInput)
+          if (plan !== null && plan.kind === 'mode') {
+            setCatalogue((rows) => rows.map((row) => (row.name === plan.name ? { ...row, mode: plan.mode } : row)))
+            setState((current) => {
+              if (current === null) return current
+              const table = current.global !== null && typeof current.global === 'object' ? { ...current.global } : {}
+              table[plan.name] = plan.mode
+              return { ...current, global: table }
+            })
+          } else if (plan !== null && plan.kind === 'surface') {
+            setState((current) => (current === null ? current : { ...current, surfaces: { ...current.surfaces, [plan.key]: plan.value } }))
+            publishSurfaces({ ...liveSurfaces, [plan.key]: plan.value })
+          } else {
+            const tools = await run('tools', t)
+            if (!aliveRef.current) return false
+            const parsed = parseTools(tools.text)
+            if (parsed !== undefined) setCatalogue(parsed.tools)
+            if (tools.state !== undefined) {
+              setState(tools.state)
+              publishSurfaces(tools.state.surfaces)
+            }
+          }
           setBusy(false)
           setNote(t('panel.note.saved'))
           return true

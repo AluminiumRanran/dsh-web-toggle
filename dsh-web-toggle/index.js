@@ -6,15 +6,16 @@
  * call on that Agent (scope-bound, so it never leaks to another Session), and
  * keeps the exact disposer that lifts it. Turning it on calls that disposer.
  *
- * Why an allowlist instead of denying `web_search`/`web_fetch`: those are only the
- * official network tools. A browser tool can open a page, an MCP server can forward
- * a request. Keeping the local tools and hiding everything else is the closed form:
- * a tool a later plugin adds stays hidden until it is named here.
+ * * Why per-tool modes instead of denying `web_search`/`web_fetch` only: those are just
+ * the official network tools. A browser tool can open a page, an MCP server can
+ * forward a request. Every tool therefore has one of three modes — `keep`, `hide`,
+ * `inspect` — and anything this plugin has never heard of defaults to `keep`,
+ * because a public release must not assume which plugins a deployment installed.
  *
- * `ops_bash` is the one dual-use tool that stays: it is the only way to do local work
- * (build, test, move files), so it is kept visible and fenced by a command guard that
- * refuses calls which look like network traffic. That guard is a filter, not a wall —
- * see README for the limits.
+ * `ops_bash` ships as `inspect`: it is the only way to do local work (build, test,
+ * move files), so it stays visible and every call is checked by a command guard that
+ * refuses network-looking traffic. That guard is a filter, not a wall — see README
+ * for the limits.
  *
  * The tool catalog changes under a live Session, so the next admitted step starts
  * a new request series: the recorded series can no longer describe the catalog,
@@ -40,15 +41,16 @@ const COMMAND = 'webtoggle'
 
 /**
  * The bundle's settings. The first three decide which configuration surfaces the
- * browser half draws; `globalTools` and `sessionTools` widen the allowlist beyond the
- * built-in local names — per deployment, and per Session.
+ * * browser half draws; `toolModes` and `sessionModes` decide, per tool, what the switch
+ * does — per deployment, and per Session.
  */
 export const Config = z.object({
   pluginPage: z.boolean().default(true).volatile().description('Reserved: the bundle detail page is always shown, because it is the entry that restores the other panels.'),
   settingsSection: z.boolean().default(true).volatile().description('Add a "Web switch" section to the settings sidebar.'),
   composerPanel: z.boolean().default(true).volatile().description('Show the small arrow next to the composer toggle that opens this Session\'s panel.'),
-  globalTools: z.array(z.string()).default([]).volatile().description('Extra tool names every Session keeps while the network is off.'),
-  sessionTools: z.dict(z.array(z.string())).default({}).volatile().description('Extra tool names kept for one Session, keyed by Session id.'),
+  debug: z.boolean().default(false).volatile().description('Write the machine-readable state into every command receipt. Off by default: a successful command prints one short line, and errors always print in full.'),
+  toolModes: z.dict(z.string()).default({}).volatile().description('Per-tool mode (keep|hide|inspect) for every Session; a tool named nowhere stays available.'),
+  sessionModes: z.dict(z.dict(z.string())).default({}).volatile().description('Per-tool mode overrides for one Session, keyed by Session id.'),
 })
 
 /** Settings field of each browser surface, keyed by the name the command accepts. */
@@ -57,49 +59,6 @@ const SURFACE_FIELDS = Object.freeze({
   settings: 'settingsSection',
   composer: 'composerPanel',
 })
-
-/**
- * The tools the switch leaves visible: every one of them only touches this machine.
- * Files, search, planning, context bookkeeping, skills, jobs. Anything that can open
- * a socket — `ops_bash`, the browser tools, MCP servers, media generation, sub-agents,
- * the plugin manager, scheduled tasks — is deliberately absent, so "off" cannot leak.
- */
-const LOCAL_TOOLS = [
-  'acp_cache',
-  'acp_read_original_image',
-  'acp_status',
-  'ask_user_question',
-  'compress',
-  'create_goal',
-  'create_skill',
-  'create_worktree',
-  'decompress',
-  'edit',
-  'get_goal',
-  'job_kill',
-  'job_list',
-  'job_output',
-  'list_agents',
-  'list_subagent_models',
-  'load_workspace_dependencies',
-  'ops_discover_tools',
-  'ops_glob',
-  'ops_grep',
-  'ops_inspect_local_file',
-  'present',
-  'read_animation',
-  'read_image',
-  'remember',
-  'schedule_list',
-  'schedule_view',
-  'search_context',
-  'skill',
-  'switch_session_preset',
-  'todo_write',
-  'update_goal',
-  'working_directory',
-  'write',
-]
 
 /**
  * Dual-use tools that stay visible while the switch is off, each fenced by a guard
@@ -122,7 +81,61 @@ const OFFLINE_NOTICE =
   'genuinely need the network, stop and tell the user you need it, and ask them to turn the ' +
   'switch back on for a while. Do the same if you suspect a false positive.'
 
-const GUARDED_TOOLS = ['ops_bash']
+/**
+ * The three modes a tool can have while the network is off. This is the plugin's whole
+ * vocabulary: the panels, the command line and the configuration file all use it.
+ *
+ * - `keep`    the tool stays visible and usable.
+ * - `hide`    the tool disappears from the model's catalog: it cannot see or call it.
+ * - `inspect` the tool stays visible, but every call is checked before it runs (see
+ *             `networkGuard`). Right now only `ops_bash` can be checked this way,
+ *             because it is the tool that carries a command line to read.
+ *
+ * Anything not named anywhere defaults to `keep`. A public release cannot assume which
+ * plugins a deployment has installed, so the closed form is "hide only what is known to
+ * reach the network, leave the rest alone" — a tool this plugin has never heard of is
+ * the deployment's business, not this switch's.
+ */
+const MODES = ['keep', 'hide', 'inspect']
+
+/** The one tool whose calls can be inspected: it carries a command string to read. */
+const INSPECT_NAME = 'ops_bash'
+
+/**
+ * Names whose whole purpose is to reach the network, grouped by the plugin family that
+ * registers them. Prefixes keep a family covered when a deployment has a newer version
+ * than this list; exact names cover one-off tools.
+ */
+const HIDE_PREFIXES = ['web_', 'bsk_', 'computer_', 'mcp__', 'video_', 'workbuddy_', 'snowluma_']
+
+/** Exact names that reach the network: delegates, remote servers, scheduled delivery. */
+const DEFAULT_HIDE = new Set([
+  'list_mcp_resource_templates',
+  'list_mcp_resources',
+  'plugin_manager',
+  'read_mcp_resource',
+  'schedule_create',
+  'schedule_edit',
+  'send_message',
+  'subagent',
+  'subagent_fork',
+  'wait_agent',
+  'workflow',
+])
+
+/**
+ * The mode this plugin ships for a tool it has never been told about.
+ * Hiding by prefix rather than by an exhaustive list is deliberate: a new `web_*` tool
+ * must not need a plugin update before the switch covers it.
+ * @param name - the tool name.
+ * @returns `inspect`, `hide`, or `keep`.
+ */
+function defaultMode(name) {
+  if (name === INSPECT_NAME) return 'inspect'
+  if (HIDE_PREFIXES.some((prefix) => name.startsWith(prefix))) return 'hide'
+  if (DEFAULT_HIDE.has(name)) return 'hide'
+  return 'keep'
+}
 
 /**
  * A name no deployment registers. `restrict()` validates before it applies anything, so
@@ -366,21 +379,22 @@ export function apply(ctx, config) {
     return typeof ref.get === 'function' ? ref.get() : ref
   }
 
-  /** One list-of-tool-names field, copied into a fresh array of non-empty strings. */
-  function confTools(name) {
-    const value = conf(name, [])
-    if (!Array.isArray(value)) return []
-    return value.filter((entry) => typeof entry === 'string' && entry !== '')
+  /** One layer of the "tool name -> mode" table, with anything unexpected dropped. */
+  function modesAt(raw) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const out = {}
+    for (const [name, mode] of Object.entries(raw)) {
+      if (typeof name === 'string' && name !== '' && MODES.includes(mode)) out[name] = mode
+    }
+    return out
   }
 
-  /** The extra tool names configured for one Session. */
-  function sessionToolsOf(sessionId) {
-    if (sessionId === undefined) return []
-    const map = conf('sessionTools', {})
-    if (map === null || typeof map !== 'object') return []
-    const list = map[sessionId]
-    if (!Array.isArray(list)) return []
-    return list.filter((entry) => typeof entry === 'string' && entry !== '')
+  /** The overrides stored for one Session (a broken value counts as "none"). */
+  function sessionModesOf(sessionId) {
+    if (sessionId === undefined) return {}
+    const map = conf('sessionModes', {})
+    if (map === null || typeof map !== 'object' || Array.isArray(map)) return {}
+    return modesAt(map[sessionId])
   }
 
   /**
@@ -440,14 +454,15 @@ export function apply(ctx, config) {
   /**
    * Refuse one guarded call when the command looks like network traffic.
    * Runs before dispatch (the kernel's `tools.guard()`), only while the switch is off,
-   * and only for `GUARDED_TOOLS`. It fails closed: a guarded call whose arguments
+   * and only for tools in the `inspect` mode (`ops_bash` by default).
+   * It fails closed: a guarded call whose arguments
    * carry no readable command is refused rather than guessed through.
    * @param exec - the pending execution (`{ name, arguments, agent, ... }`).
    * @returns a denial reason, or undefined to let the call through.
    */
   function networkGuard(exec) {
     if (exec === null || typeof exec !== 'object') return undefined
-    if (!GUARDED_TOOLS.includes(exec.name)) return undefined
+    if (exec.name !== INSPECT_NAME) return undefined
     const args = exec.arguments
     const command = args !== null && typeof args === 'object' ? args.command : undefined
     if (typeof command !== 'string') {
@@ -531,8 +546,8 @@ export function apply(ctx, config) {
     return {
       off: agent?.session?.id === undefined ? false : isOff(agent),
       surfaces: surfacesOf(),
-      global: confTools('globalTools'),
-      session: sessionToolsOf(sessionId),
+      global: modesAt(conf('toolModes', {})),
+      session: sessionModesOf(sessionId),
       writable: canSave(),
     }
   }
@@ -545,10 +560,22 @@ export function apply(ctx, config) {
    * @param extra - an optional machine-readable payload placed before the markers, so the
    *   panels can parse it without depending on message order.
    */
-  function result(agent, kind, text, extra) {
+  function markerText(agent, text, extra) {
     const off = agent?.session?.id === undefined ? false : isOff(agent)
     const payload = extra === undefined ? '' : ` ${extra}`
-    return { kind, text: `${text}${payload} ${markerOf(off)} [web-state]${JSON.stringify(stateOf(agent))}` }
+    return `${text}${payload} ${markerOf(off)} [web-state]${JSON.stringify(stateOf(agent))}`
+  }
+
+  /**
+   * 默认只写一句人话：聊天里的命令回执用户会一直看到，机器标记会反复刷屏。
+   * 机器标记只在两种情况下附带——读命令（面板要靠它重建状态），或者用户开了 debug。
+   * 错误永远完整打印，debug 时再额外附上状态，方便贴出来排查。
+   */
+  function result(agent, kind, text, extra, withState = false) {
+    const verbose = conf('debug', false) === true
+    if (kind !== 'success') return verbose ? { kind, text: markerText(agent, text, extra) } : { kind, text }
+    if (!verbose && !withState) return { kind, text: extra === undefined ? text : `${text} ${extra}` }
+    return { kind, text: markerText(agent, text, extra) }
   }
 
   /**
@@ -564,7 +591,7 @@ export function apply(ctx, config) {
         agent,
         'success',
         changed
-          ? '已断网：从下一次请求起，本会话只剩本地工具（shell 保留，但联网类命令会被拦下），网页搜索、浏览器、MCP、生图/视频、子代理全部隐藏。 / Network off for this session: local work only, and shell commands that would fetch anything are refused.'
+          ? '已断网：从下一次请求起，设为「隐藏」的工具消失，设为「内容检查」的工具（默认 shell）保留但每次调用都会被检查，其余工具照常可用。 / Network off for this session: hidden tools disappear, inspected tools (the shell by default) stay but every call is checked, and everything else keeps working.'
           : '本会话本来就是断网状态，没有重复加限制。 / The network was already off for this session.',
       )
     }
@@ -624,55 +651,66 @@ export function apply(ctx, config) {
     return new Set(names)
   }
 
-  /**
-   * The list one scope keeps while the network is off. The three layers are complete
-   * lists, nearest first: this Session's override, the global override, and the
-   * built-in local names. An empty list is "not configured", not "keep nothing" — the
-   * switch must never be able to leave a Session with no tools at all.
-   * @param agent - the Agent whose allowlist is composed.
-   * @returns the kept names and which layer supplied them.
-   */
-  function keepOf(agent) {
-    const sessionId = agent?.session?.id
-    const session = sessionToolsOf(sessionId)
-    if (session.length > 0) return { list: session, source: 'session' }
-    const global = confTools('globalTools')
-    if (global.length > 0) return { list: global, source: 'global' }
-    return { list: [...LOCAL_TOOLS, ...GUARDED_TOOLS], source: 'default' }
+  /** The mode in force for one tool: Session override, then global override, then default. */
+  function modeOf(agent, name) {
+    const session = sessionModesOf(agent?.session?.id)
+    if (MODES.includes(session[name])) return session[name]
+    const global = modesAt(conf('toolModes', {}))
+    if (MODES.includes(global[name])) return global[name]
+    return defaultMode(name)
   }
 
   /**
-   * The tool names this Agent keeps while the network is off, narrowed to what
-   * `restrict()` accepts — it throws on an unknown name instead of ignoring it.
-   * @param agent - the Agent whose allowlist is composed.
-   * @returns the allowlist to hand to `tools.restrict()`.
+   * Every tool name this Agent's scope would accept from `restrict()`.
+   * It has to be asked through the Agent: a plugin's own view is the global one and
+   * misses whatever a profile composes around the Agent.
+   * @param agent - the Agent whose scope is read.
+   * @returns the sorted names, empty when the scope cannot be read.
    */
-  function sessionAllow(agent) {
-    const { list } = keepOf(agent)
-    const unique = list.filter((name, index) => list.indexOf(name) === index)
+  function scopedNames(agent) {
     const known = restrictableOf(agent)
-    if (known === undefined) return unique
-    return unique.filter((name) => known.has(name))
+    if (known === undefined) return []
+    return [...known].sort((left, right) => left.localeCompare(right))
   }
 
   /**
-   * Apply a whitelist restriction, learning the accepted names when composing the list
-   * was not enough: the first attempt doubles as a probe, and a retry keeps only the
-   * names that scope admits.
-   * @param agent - the Agent to restrict.
-   * @param allow - the names to keep.
-   * @returns the disposer, or the error that prevented the restriction.
+   * Split the catalog by mode: what must disappear while the network is off, and what
+   * must stay visible but be checked on every call.
+   * @param agent - the Agent whose catalog is split.
    */
-  function openRestriction(agent, allow) {
+  function splitByMode(agent) {
+    const hide = []
+    const inspect = []
+    for (const name of scopedNames(agent)) {
+      const mode = modeOf(agent, name)
+      if (mode === 'hide') hide.push(name)
+      else if (mode === 'inspect') inspect.push(name)
+    }
+    return { hide, inspect }
+  }
+
+  /**
+   * Turn the switch off for one Agent: hide the `hide` names, leave `inspect` names to
+   * the guard. An empty deny list is correct — it means "nothing to hide here".
+   * @param agent - the Agent being restricted.
+   * @param deny - the names that must disappear.
+   * @returns the disposer, or the error that stopped the restriction.
+   */
+  function openRestriction(agent, deny) {
+    if (deny.length === 0) return { dispose: () => {} }
     try {
-      return { dispose: agent.ctx.tools.restrict({ allow }) }
+      return { dispose: agent.ctx.tools.restrict({ deny }) }
     } catch (error) {
+      // The catalog can move between our read and this call (a plugin unloading, a tool
+      // re-registering under the same Session). `restrict()` names the tools it rejected
+      // and validates before applying anything, so narrowing the list once is safe: the
+      // names it does accept are still hidden from this point on.
       const known = namesFromUnknownToolError(error)
       if (known === undefined) return { error }
-      const narrowed = allow.filter((name) => known.has(name))
-      if (narrowed.length === allow.length) return { error }
+      const narrowed = deny.filter((name) => known.has(name))
+      if (narrowed.length === 0) return { dispose: () => {} }
       try {
-        return { dispose: agent.ctx.tools.restrict({ allow: narrowed }) }
+        return { dispose: agent.ctx.tools.restrict({ deny: narrowed }) }
       } catch (retry) {
         return { error: retry }
       }
@@ -680,85 +718,58 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Hide every network-capable tool for one Agent and arm the request-series rebuild.
+   * Turn the network off for this Session: hide what the catalog says to hide, then put
+   * the command guard in front of what must stay visible.
    * @param agent - the receiving Agent.
-   * @returns the command result the UI renders.
    */
   function switchOff(agent) {
     const sessionId = agent.session.id
-    // The allowlist must only name tools this deployment actually registers: a name
-    // that is not in the catalog would make `restrict()` throw instead of narrowing.
-    // Read once per toggle — this is the only catalog-sized work the plugin ever does.
-    const allow = sessionAllow(agent)
-    if (allow.length === 0) {
-      return result(
-        agent,
-        'error',
-        '无法断网：本部署没有注册任何可保留的本地工具 / Could not switch off: none of the local tools are registered here.',
-      )
-    }
-    // Arm BEFORE the restriction lands: if the restriction is resolvable while the
-    // mark is missing, a request could describe the old catalog.
     pendingSeries.add(sessionId)
-    const opened = openRestriction(agent, allow)
+    const { hide, inspect } = splitByMode(agent)
+    const opened = openRestriction(agent, hide)
     if (opened.error !== undefined) {
       pendingSeries.delete(sessionId)
-      return result(agent, 'error', `无法断网 / Could not turn the network off: ${messageOf(opened.error)}`)
+      return result(agent, 'error', `没能关掉联网开关 / Could not turn the network off: ${messageOf(opened.error)}`)
     }
     let disposeGuard
     try {
-      // The kept dual-use tools are fenced here rather than hidden.
-      disposeGuard = agent.ctx.tools.guard(networkGuard)
+      if (inspect.length > 0) disposeGuard = agent.ctx.tools.guard(networkGuard)
     } catch (error) {
-      pendingSeries.delete(sessionId)
+      // The restriction is already applied; lift it again so "off" never half-lands.
       safely(() => opened.dispose())
-      return result(agent, 'error', `无法断网 / Could not turn the network off: ${messageOf(error)}`)
+      pendingSeries.delete(sessionId)
+      return result(agent, 'error', `没能装上命令检查 / Could not install the command check: ${messageOf(error)}`)
     }
     offSessions.set(sessionId, { agent, dispose: opened.dispose, disposeGuard })
     return report(agent, true)
   }
 
   /**
-   * Lift the restriction on one Agent and arm the request-series rebuild.
+   * Turn the network back on: lift the restriction and the guard, and let the next
+   * admitted step rebuild the request series so the model sees the tools again.
+   * A row left behind by an earlier Agent of the same Session is lifted as well: its
+   * disposers belong to that dead scope, but dropping the row keeps the bookkeeping
+   * honest for the Session that outlives it.
    * @param agent - the receiving Agent.
-   * @returns the command result the UI renders.
    */
   function switchOn(agent) {
     const sessionId = agent.session.id
-    const row = offSessions.get(sessionId)
-    if (row === undefined || row.agent !== agent) {
-      // Nothing of this Agent's is restricted, but a stale row from an earlier Agent
-      // of the same Session still owns a disposer: drop it rather than leak it.
-      if (row !== undefined) {
-        offSessions.delete(sessionId)
-        safely(() => row.dispose())
-        safely(() => row.disposeGuard?.())
-      }
-      offSessions.delete(sessionId)
-      return report(agent, false)
-    }
-    offSessions.delete(sessionId)
-    try {
-      row.dispose()
-      if (row.disposeGuard !== undefined) row.disposeGuard()
-    } catch (error) {
-      // The layer may already be torn down; the state is on either way, but say so.
-      return result(
-        agent,
-        'error',
-        `已取消记录，但撤销限制时报告错误 / Recorded as on, but lifting the restriction reported: ${messageOf(error)}`,
-      )
-    }
     pendingSeries.add(sessionId)
+    const row = offSessions.get(sessionId)
+    offSessions.delete(sessionId)
+    if (row !== undefined) {
+      safely(() => row.dispose?.())
+      safely(() => row.disposeGuard?.())
+    }
     return report(agent, true)
   }
 
   /**
-   * Re-apply the allowlist to every Session that is currently off, so an edit takes
-   * effect at once instead of waiting for the next on/off. A Session with an open turn
-   * is skipped: its current request already declared a catalog, and splitting one turn
-   * between two catalogs is exactly what the switch refuses to do.
-   * @returns how many Sessions adopted the new list, and how many were skipped.
+   * Re-apply the modes to every Session that is still switched off. Build the new
+   * restriction before lifting the old one, so there is never a window where neither
+   * applies. A Session with a running turn is skipped: its tool set is already admitted,
+   * and the next `off` (or the turn's end) picks the change up.
+   * @returns how many Agents were retuned and how many were skipped.
    */
   function retune() {
     let applied = 0
@@ -768,37 +779,30 @@ export function apply(ctx, config) {
         skipped += 1
         continue
       }
-      const allow = sessionAllow(row.agent)
-      if (allow.length === 0) {
-        skipped += 1
-        continue
-      }
-      // Arm first, then swap layers: the new restriction lands before the old one is
-      // lifted, so the catalog never widens in between.
-      pendingSeries.add(sessionId)
-      const opened = openRestriction(row.agent, allow)
+      const { hide, inspect } = splitByMode(row.agent)
+      const opened = openRestriction(row.agent, hide)
       if (opened.error !== undefined) {
-        pendingSeries.delete(sessionId)
         skipped += 1
         continue
       }
-      const previous = row.dispose
-      const previousGuard = row.disposeGuard
-      let nextGuard
-      try {
-        nextGuard = row.agent.ctx.tools.guard(networkGuard)
-      } catch {
-        nextGuard = previousGuard
+      let disposeGuard
+      if (inspect.length > 0) {
+        try {
+          disposeGuard = row.agent.ctx.tools.guard(networkGuard)
+        } catch {
+          disposeGuard = undefined
+        }
       }
-      offSessions.set(sessionId, { agent: row.agent, dispose: opened.dispose, disposeGuard: nextGuard })
-      safely(() => previous())
-      if (nextGuard !== previousGuard) safely(() => previousGuard?.())
+      pendingSeries.add(sessionId)
+      offSessions.set(sessionId, { agent: row.agent, dispose: opened.dispose, disposeGuard })
+      safely(() => row.dispose?.())
+      safely(() => row.disposeGuard?.())
       applied += 1
     }
     return { applied, skipped }
   }
 
-  /** Parse `on`/`off` (and their obvious aliases); anything else is a usage error. */
+  /** Parse `on|true|1|show|yes` as true and `off|false|0|hide|no` as false. */
   function parseSwitch(token) {
     const value = typeof token === 'string' ? token.trim().toLowerCase() : ''
     if (value === 'on' || value === 'true' || value === '1' || value === 'show' || value === 'yes') return true
@@ -806,90 +810,91 @@ export function apply(ctx, config) {
     return undefined
   }
 
-  /** The complete keep-list one scope currently holds, as a plain array. */
-  function readOverride(current, global, sessionId) {
-    if (global) return Array.isArray(current.globalTools) ? current.globalTools : []
-    const map = current.sessionTools
-    const list = map !== null && typeof map === 'object' ? map[sessionId] : undefined
-    return Array.isArray(list) ? list : []
-  }
-
-  /** Replace the complete keep-list of one scope; an empty list means "inherit". */
-  function writeOverride(current, global, sessionId, list) {
-    if (global) return { ...current, globalTools: list }
-    const map = current.sessionTools !== null && typeof current.sessionTools === 'object' ? { ...current.sessionTools } : {}
-    if (list.length === 0) delete map[sessionId]
-    else map[sessionId] = list
-    return { ...current, sessionTools: map }
+  /**
+   * Parse one word into a mode. `on`/`off` are accepted as the older spelling of
+   * `keep`/`hide`, so a panel cached in a browser tab keeps working across an upgrade.
+   * @param token - the word after the tool name.
+   */
+  function parseMode(token) {
+    const value = typeof token === 'string' ? token.trim().toLowerCase() : ''
+    if (value === '') return undefined
+    if (value === 'keep' || value === 'on' || value === 'true' || value === '1' || value === 'show' || value === 'yes') return 'keep'
+    if (value === 'hide' || value === 'off' || value === 'false' || value === '0' || value === 'drop' || value === 'no') return 'hide'
+    if (value === 'inspect' || value === 'check' || value === 'scan' || value === 'match' || value === 'pattern') return 'inspect'
+    return undefined
   }
 
   /**
-   * Turn one tool on or off for one scope. The scope keeps a *complete* list, so the
-   * first edit materialises the list that was in force (the built-in names, or the
-   * layer below), and later edits just toggle a member.
+   * Store one tool's mode. A value equal to what the scope already inherits is deleted
+   * instead of written, so the configuration file only shows real deviations.
    * @param agent - the Agent the command ran for.
    * @param name - the tool name.
-   * @param value - true to keep it while the network is off, false to hide it.
+   * @param mode - `keep`, `hide`, or `inspect`.
    * @param global - whether the edit lands in the global layer.
    * @returns what the write did.
    */
-  async function writeKeep(agent, name, value, global) {
+  async function writeMode(agent, name, mode, global) {
     const sessionId = agent.session.id
-    // A global edit starts from the global layer, not from whatever this Session already
-    // narrowed down to: otherwise one task's list would leak into every other task.
-    const globalList = confTools('globalTools')
-    const base = global ? (globalList.length > 0 ? globalList : [...LOCAL_TOOLS, ...GUARDED_TOOLS]) : keepOf(agent).list
-    const saved = await saveConfig((current) => {
-      const existing = readOverride(current, global, sessionId)
-      const list = existing.length > 0 ? existing : base
-      const next = value === true ? (list.includes(name) ? list : [...list, name]) : list.filter((entry) => entry !== name)
-      return writeOverride(current, global, sessionId, next)
+    return saveConfig((current) => {
+      if (global) {
+        const modes = modesAt(current.toolModes)
+        if (mode === defaultMode(name)) delete modes[name]
+        else modes[name] = mode
+        return { ...current, toolModes: modes }
+      }
+      const all = current.sessionModes !== null && typeof current.sessionModes === 'object' ? { ...current.sessionModes } : {}
+      const layer = modesAt(all[sessionId])
+      // 和继承来的值相同就删掉：这一层只记真正偏离下一层的设置。
+      const inherited = modesAt(current.toolModes)[name] ?? defaultMode(name)
+      if (mode === inherited) delete layer[name]
+      else layer[name] = mode
+      if (Object.keys(layer).length === 0) delete all[sessionId]
+      else all[sessionId] = layer
+      return { ...current, sessionModes: all }
     })
-    return saved
   }
 
-  /**
-   * Reset one scope back to the layer below it.
-   * @param agent - the Agent the command ran for.
-   * @param global - whether the edit lands in the global layer.
-   * @returns what the write did.
-   */
-  async function resetKeep(agent, global) {
-    return saveConfig((current) => writeOverride(current, global, agent.session.id, []))
+  /** Hand one scope back to the layer below it. */
+  async function resetModes(agent, global) {
+    const sessionId = agent.session.id
+    return saveConfig((current) => {
+      if (global) return { ...current, toolModes: {} }
+      const all = current.sessionModes !== null && typeof current.sessionModes === 'object' ? { ...current.sessionModes } : {}
+      delete all[sessionId]
+      return { ...current, sessionModes: all }
+    })
   }
 
-  /** One sentence describing the lists and the surface switches. */
+  /** One sentence describing the surface switches and the current split. */
   function describeConfig(agent) {
     const surfaces = surfacesOf()
-    const { list, source } = keepOf(agent)
+    const { hide, inspect } = splitByMode(agent)
     const flags = `pluginPage=${surfaces.plugin ? 'on' : 'off'} settingsSection=${surfaces.settings ? 'on' : 'off'} composerPanel=${surfaces.composer ? 'on' : 'off'}`
-    const where = source === 'session' ? '本会话 / this Session' : source === 'global' ? '全局 / global' : '内置默认 / built-in'
     const writable = canSave() ? '' : '（本 profile 不能写配置，改动只在本次运行生效 / this profile cannot save, changes last until restart）'
-    return `${flags}；保留 ${list.length} 个工具（${where}）/ keeping ${list.length} tool(s) from ${where}.${writable}`
+    return `${flags}；隐藏 ${hide.length} 个、内容检查 ${inspect.length} 个，其余放行 / hiding ${hide.length}, inspecting ${inspect.length}, everything else kept.${writable}`
   }
 
   /**
-   * The catalogue the panels draw: every name this Agent's scope would accept, with
-   * whether it is kept right now.
+   * The catalog the panels draw: every tool this scope knows plus any name the
+   * configuration mentions, each with its mode and whether that mode is the default.
    * @param agent - the Agent the command ran for.
    */
   function catalogueOf(agent) {
-    const known = restrictableOf(agent)
-    const { list, source } = keepOf(agent)
-    const kept = new Set(list)
-    const names = known === undefined ? list : [...known]
-    names.sort((left, right) => left.localeCompare(right))
+    const names = new Set(scopedNames(agent))
+    for (const name of Object.keys(modesAt(conf('toolModes', {})))) names.add(name)
+    for (const name of Object.keys(sessionModesOf(agent.session.id))) names.add(name)
     return {
-      source,
-      tools: names.map((name) => ({ name, kept: kept.has(name), builtIn: LOCAL_TOOLS.includes(name) || GUARDED_TOOLS.includes(name) })),
+      tools: [...names]
+        .sort((left, right) => left.localeCompare(right))
+        .map((name) => ({ name, mode: modeOf(agent, name), builtIn: defaultMode(name) !== 'keep' })),
     }
   }
 
   /**
-   * Read or write the plugin's own settings: the three browser surfaces, the keep-list,
-   * and the tool catalogue the panels render.
-   * @param agent - the Agent the command ran for (its Session owns the per-Session list).
-   * @param verb - `config`, `surface`, `tools`, `keep`, or `allow`.
+   * Read or write the plugin's own settings: the three browser surfaces, the per-tool
+   * modes, and the catalog the panels render.
+   * @param agent - the Agent the command ran for (its Session owns the per-Session layer).
+   * @param verb - `config`, `surface`, `tools`, `mode`, or the older `keep`/`allow`.
    * @param args - the remaining tokens.
    * @returns the command result the UI renders.
    */
@@ -897,13 +902,15 @@ export function apply(ctx, config) {
     const global = args.includes('--global')
     const sessionId = agent.session.id
     const tokens = args.filter((token) => token !== '--global')
-    // Every keep/surface answer carries the fresh catalogue, so a panel updates its
-    // switches from one round-trip instead of asking again.
+    // Every answer can carry the fresh catalog, so a panel updates its switches from one
+    // round-trip instead of asking again.
     const toolsMarker = () => `[web-tools]${JSON.stringify(catalogueOf(agent))}`
+    // 默认模式里编辑类回执不带目录：面板自己知道刚刚改了什么，不必来回刷屏。
+    const diagnostics = () => (conf('debug', false) === true ? toolsMarker() : undefined)
     const tunedText = (tuned) =>
       tuned.applied === 0 && tuned.skipped === 0 ? '' : ` 已刷新 ${tuned.applied}${tuned.skipped === 0 ? '' : `，跳过 ${tuned.skipped}（正在执行）`}`
 
-    if (verb === 'config') return result(agent, 'success', describeConfig(agent))
+    if (verb === 'config') return result(agent, 'success', describeConfig(agent), diagnostics())
 
     if (verb === 'tools') {
       const catalogue = catalogueOf(agent)
@@ -912,6 +919,7 @@ export function apply(ctx, config) {
         'success',
         `共 ${catalogue.tools.length} 个可用工具 / ${catalogue.tools.length} tool(s) in this catalogue`,
         `[web-tools]${JSON.stringify(catalogue)}`,
+        true,
       )
     }
 
@@ -944,63 +952,55 @@ export function apply(ctx, config) {
         agent,
         'success',
         `已把 ${key} 配置面板设为${value ? '显示' : '隐藏'} / ${key} panel is now ${value ? 'shown' : 'hidden'}. ${describeConfig(agent)}`,
-        toolsMarker(),
+        diagnostics(),
       )
     }
 
-    // Everything below edits the keep-list. `allow` is the older spelling and stays an
-    // alias so a panel cached in a browser tab keeps working across an upgrade.
+    // Everything below edits one tool's mode. `keep <tool> on|off` and
+    // `allow add|remove <tool>` are the older spellings and stay aliases.
     const action = (tokens[0] ?? '').toLowerCase()
     const scope = global ? '全局 / global' : '本会话 / this Session'
 
-    if (action === 'list' || action === '') return result(agent, 'success', describeConfig(agent))
+    if (action === '' || action === 'list') return result(agent, 'success', describeConfig(agent), diagnostics())
 
-    if (action === 'clear' || action === 'reset') {
-      const saved = await resetKeep(agent, global)
-      if (!saved.saved) return result(agent, 'error', `没能保存白名单 / Could not save the keep-list: ${saved.reason}`)
+    if (action === 'reset' || action === 'clear') {
+      const saved = await resetModes(agent, global)
+      if (!saved.saved) return result(agent, 'error', `没能保存工具设置 / Could not save the tool modes: ${saved.reason}`)
       return result(
         agent,
         'success',
-        `已把${scope}保留名单交还给上一层 / Reset the ${global ? 'global' : 'Session'} keep-list to the layer below.${tunedText(retune())}`,
-        toolsMarker(),
+        `已把${scope}的工具设置交还给上一层 / Reset the ${global ? 'global' : 'Session'} tool modes to the layer below.${tunedText(retune())}`,
+        diagnostics(),
       )
     }
 
-    const removing = action === 'remove' || action === 'rm' || action === 'delete' || action === 'del' || action === '-' || action === 'off'
-    const adding = action === 'add' || action === '+' || action === 'set' || action === 'on' || verb === 'keep'
-    if (!removing && !adding) {
-      return result(agent, 'error', `用法 / usage: /${COMMAND} keep <tool> on|off [--global] | /${COMMAND} keep reset [--global] | /${COMMAND} tools`)
-    }
-    // `keep <tool> on|off` and `keep set <tool> on|off` and `allow add|remove <tool>` all
-    // land here; find the name and the value whichever spelling was used.
     let name = ''
-    let value
-    if (verb === 'keep') {
-      // `keep <tool> on|off`: the name comes first, the switch second.
-      name = tokens[0] ?? ''
-      value = parseSwitch(tokens[1])
-    } else {
+    let mode
+    if (verb === 'allow') {
       // `allow add|remove <tool>`: the verb already carries the direction.
+      const removing = action === 'remove' || action === 'rm' || action === 'delete' || action === 'del' || action === '-' || action === 'off'
       name = tokens[1] ?? ''
-      value = removing ? false : true
+      mode = removing ? 'hide' : 'keep'
+    } else {
+      // `mode <tool> keep|hide|inspect` (and the older `keep <tool> on|off`).
+      name = tokens[0] ?? ''
+      mode = parseMode(tokens[1])
     }
-    if (name === '') {
-      return result(agent, 'error', `用法 / usage: /${COMMAND} keep <tool> on|off [--global]`)
-    }
-    if (value === undefined) {
-      return result(agent, 'error', `用法 / usage: /${COMMAND} keep ${name} on|off [--global]`)
-    }
-    const known = restrictableOf(agent)
-    const saved = await writeKeep(agent, name, value, global)
-    if (!saved.saved) return result(agent, 'error', `没能保存白名单 / Could not save the keep-list: ${saved.reason}`)
+    if (name === '') return result(agent, 'error', `用法 / usage: /${COMMAND} mode <tool> keep|hide|inspect [--global]`)
+    if (mode === undefined) return result(agent, 'error', `用法 / usage: /${COMMAND} mode ${name} keep|hide|inspect [--global]`)
+    const saved = await writeMode(agent, name, mode, global)
+    if (!saved.saved) return result(agent, 'error', `没能保存工具设置 / Could not save the tool mode: ${saved.reason}`)
     const tuned = retune()
-    const warning = known !== undefined && !known.has(name)
-      ? `这个目录里没有 ${name}（已记下，注册后即生效）/ "${name}" is not in this catalogue (recorded, takes effect once registered)；`
-      : ''
-    const note = value
-      ? `已让 ${name} 在断网时保留 / "${name}" now stays available while the network is off.`
-      : `已让 ${name} 在断网时隐藏 / "${name}" is now hidden while the network is off.`
-    return result(agent, 'success', `${warning}${note}（${scope}）${tunedText(tuned)} ${describeConfig(agent)}`, toolsMarker())
+    const warning = scopedNames(agent).includes(name)
+      ? ''
+      : `这个目录里没有 ${name}（已记下，注册后即生效）/ "${name}" is not in this catalogue (recorded, takes effect once registered)；`
+    const note =
+      mode === 'hide'
+        ? `已让 ${name} 在断网时隐藏 / "${name}" is hidden while the network is off.`
+        : mode === 'inspect'
+          ? `已让 ${name} 在断网时保留，但每次调用都会检查内容 / "${name}" stays visible while the network is off, with every call inspected.`
+          : `已让 ${name} 在断网时保留 / "${name}" stays available while the network is off.`
+    return result(agent, 'success', `${warning}${note}（${scope}）${tunedText(tuned)} ${describeConfig(agent)}`, diagnostics())
   }
 
   /**
@@ -1015,7 +1015,14 @@ export function apply(ctx, config) {
     const requested = head.toLowerCase()
     // The configuration forms need no Agent state, but the Session still scopes the
     // per-Session list; only the plain switch needs a Session at all.
-    if (requested === 'config' || requested === 'surface' || requested === 'tools' || requested === 'keep' || requested === 'allow') {
+    if (
+      requested === 'config' ||
+      requested === 'surface' ||
+      requested === 'tools' ||
+      requested === 'mode' ||
+      requested === 'keep' ||
+      requested === 'allow'
+    ) {
       if (agent?.session?.id === undefined) {
         return { kind: 'error', text: '没有可配置的会话 / No Session to configure.' }
       }
@@ -1028,7 +1035,7 @@ export function apply(ctx, config) {
     if (requested !== '' && requested !== 'on' && requested !== 'off') {
       return {
         kind: 'error',
-        text: `用法 / usage: /${COMMAND} [on|off|status] | /${COMMAND} tools | /${COMMAND} keep <tool> on|off [--global] | /${COMMAND} surface <plugin|settings|composer> on|off`,
+        text: `用法 / usage: /${COMMAND} [on|off|status] | /${COMMAND} tools | /${COMMAND} mode <tool> keep|hide|inspect [--global] | /${COMMAND} surface <plugin|settings|composer> on|off`,
       }
     }
     const current = isOff(agent)
@@ -1051,8 +1058,8 @@ export function apply(ctx, config) {
 
   ctx.commands.register({
     name: COMMAND,
-    description: 'Punch the network switch for this Session, or configure which panels show and which tools stay.',
-    input: { hint: 'on|off|status|tools|keep <tool> on|off [--global]|surface <plugin|settings|composer> on|off' },
+    description: 'Turn this Session\'s network tools off, and decide per tool what the switch hides, keeps, or inspects.',
+    input: { hint: 'on|off|status|tools|mode <tool> keep|hide|inspect [--global]|mode reset [--global]|surface <plugin|settings|composer> on|off' },
     handler: ({ agent, rawInput }) => toggle(agent, rawInput),
   })
 }

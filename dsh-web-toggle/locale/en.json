@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Network switch",
-    "description": "A per-task network switch: turn it off and this task no longer sees web search, the browser, MCP servers, subagents or any other internet-facing tool, and shell commands that would fetch anything are refused; turn it on to restore them. Ships three configuration surfaces (a caret beside the composer toggle, a settings section, and this plugin's detail page) with per-task keep-lists.",
+    "description": "A per-session network switch: every tool has one of three modes — keep, hide or inspect. When off, internet-facing tools disappear, general-purpose executors (the shell) are content-checked per call, and everything unlisted stays available. Three configuration surfaces (composer caret, settings section, bundle detail page) with modes layered per session, globally, and by factory default.",
     "detail": "docs/DETAIL.md"
   }
 }

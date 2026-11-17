@@ -212,62 +212,50 @@ function fakeHost(initial = {}) {
   const state = {
     off: false,
     surfaces: { plugin: true, settings: true, composer: true },
-    global: [],
-    session: [],
+    // 两层「工具名 -> 模式」覆盖表，和宿主那边一样。
+    global: {},
+    session: {},
     writable: true,
     ...initial,
   }
   state.calls = []
-  // The catalogue the panel draws, and the list a scope keeps out of the box.
+  // The catalogue the panel draws, and this plugin's shipped modes.
   const CATALOGUE = ['bash', 'grep', 'ops_bash', 'read', 'web_fetch', 'web_search', 'write']
-  const BUILT_IN = ['ops_bash', 'read', 'write']
-  const DEFAULT_KEPT = ['ops_bash', 'read']
-  const effective = () => (state.session.length > 0 ? state.session : state.global.length > 0 ? state.global : DEFAULT_KEPT)
-  const catalogue = () => {
-    const kept = effective()
-    return {
-      source: state.session.length > 0 ? 'session' : state.global.length > 0 ? 'global' : 'default',
-      tools: [...CATALOGUE].sort().map((name) => ({ name, kept: kept.includes(name), builtIn: BUILT_IN.includes(name) })),
-    }
-  }
-  const push = (list, name) => {
-    if (!list.includes(name)) list.push(name)
-  }
-  const drop = (list, name) => {
-    const at = list.indexOf(name)
-    if (at >= 0) list.splice(at, 1)
-  }
+  const DEFAULT_MODES = { ops_bash: 'inspect', web_fetch: 'hide', web_search: 'hide' }
+  const modeIn = (name) => state.session[name] ?? state.global[name] ?? DEFAULT_MODES[name] ?? 'keep'
+  const catalogue = () => ({
+    tools: [...CATALOGUE]
+      .sort()
+      .map((name) => ({ name, mode: modeIn(name), builtIn: DEFAULT_MODES[name] !== undefined })),
+  })
   const apply = (line) => {
     const words = line.replace(/^\/webtoggle\s*/, '').trim().split(/\s+/)
     const [head, ...rest] = words
+    const global = rest.includes('--global')
+    const table = global ? state.global : state.session
     if (head === 'off') state.off = true
     else if (head === 'on') state.off = false
-    else if (head === 'surface') state.surfaces[rest[0]] = rest[1] === 'on'
-    else if (head === 'keep') {
-      const [name, value] = rest
-      const global = rest.includes('--global')
-      const list = global ? state.global : state.session
-      if (rest[0] === 'reset') list.length = 0
-      else if (name !== undefined) {
-        if (list.length === 0) list.push(...effective())
-        if (value === 'on') push(list, name)
-        else if (value === 'off') drop(list, name)
-      }
+    else if (head === 'surface') {
+      if (rest[0] !== 'plugin') state.surfaces[rest[0]] = rest[1] === 'on'
+    } else if (head === 'mode') {
+      if (rest[0] === 'reset' || rest[0] === 'clear') for (const key of Object.keys(table)) delete table[key]
+      else if (rest[0] !== undefined && rest[1] !== undefined) table[rest[0]] = rest[1]
+    } else if (head === 'keep') {
+      if (rest[0] === 'reset') for (const key of Object.keys(table)) delete table[key]
+      else if (rest[0] !== undefined) table[rest[0]] = rest[1] === 'on' ? 'keep' : 'hide'
     } else if (head === 'allow') {
       const verb = rest[0]
-      const global = rest.includes('--global')
-      const list = global ? state.global : state.session
       const name = rest.find((word) => word !== '--global' && word !== verb)
-      if (verb === 'add' && name !== undefined) push(list, name)
-      else if (verb === 'remove' && name !== undefined) drop(list, name)
-      else if (verb === 'clear') list.length = 0
+      if (verb === 'add' && name !== undefined) table[name] = 'keep'
+      else if (verb === 'remove' && name !== undefined) table[name] = 'hide'
+      else if (verb === 'clear') for (const key of Object.keys(table)) delete table[key]
     }
   }
   const view = () => ({
     off: state.off,
     surfaces: { ...state.surfaces },
-    global: [...state.global],
-    session: [...state.session],
+    global: { ...state.global },
+    session: { ...state.session },
     writable: state.writable,
   })
   return {
@@ -279,9 +267,8 @@ function fakeHost(initial = {}) {
           state.calls.push([sessionId, line])
           apply(line)
           const marker = `[web:${state.off ? 'off' : 'on'}]`
-          const catalogueMarker = line === '/webtoggle tools' || line.startsWith('/webtoggle keep') || line.startsWith('/webtoggle surface')
-            ? ` [web-tools]${JSON.stringify(catalogue())}`
-            : ''
+          const withCatalogue = ['tools', 'mode', 'keep', 'allow', 'surface'].includes(line.replace(/^\/webtoggle\s*/, '').split(/\s+/)[0])
+          const catalogueMarker = withCatalogue ? ` [web-tools]${JSON.stringify(catalogue())}` : ''
           return { ok: true, value: { result: { kind: 'success', text: `ok${catalogueMarker} ${marker} [web-state]${JSON.stringify(view())}` } } }
         },
       },
@@ -543,8 +530,8 @@ function expand(node) {
   assert.equal(caret.props['aria-expanded'], 'false')
   caret.props.onClick()
   await settle()
-  assert.ok(lastCommand(host, '/webtoggle status'), '打开时应问一次宿主状态')
-  assert.ok(lastCommand(host, '/webtoggle tools'), '打开时应取一次工具目录')
+  assert.ok(lastCommand(host, '/webtoggle tools'), '打开时只取一次工具目录')
+  assert.ok(!host.state.calls.some((call) => call[1] === '/webtoggle status'), '打开面板不再多问一次状态')
   tree = render()
   tree = render()
   tree = render()
@@ -565,23 +552,29 @@ function expand(node) {
   const row = toolRow(tree, 'web_search')
   assert.ok(row !== undefined, '目录里应有 web_search 这一行')
   const toggle = queryAll(row, 'dswt-btn')[0]
-  assert.equal(toggle.props['data-on'], 'false', '默认不保留它')
+  assert.equal(toggle.props['data-mode'], 'hide', '默认是隐藏')
   toggle.props.onClick()
   await settle()
-  assert.ok(lastCommand(host, '/webtoggle keep web_search on'), '开关要带工具名与方向')
-  assert.ok(host.state.session.includes('web_search'), '宿主那边的名单要变')
+  assert.ok(lastCommand(host, '/webtoggle mode web_search inspect'), '点一下切到下一种模式')
+  assert.equal(host.state.session.web_search, 'inspect', '宿主那边的模式要变')
   tree = render()
   tree = render()
-  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-on'], 'true', '回执后开关要跟着变')
+  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-mode'], 'inspect', '回执后按钮要跟着变')
 
-  // 再点一下：移出名单
+  // 再点一下：内容检查 -> 保留
   queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props.onClick()
   await settle()
-  assert.ok(lastCommand(host, '/webtoggle keep web_search off'))
-  assert.ok(!host.state.session.includes('web_search'))
+  assert.ok(lastCommand(host, '/webtoggle mode web_search keep'))
+  assert.equal(host.state.session.web_search, 'keep')
   tree = render()
   tree = render()
-  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-on'], 'false')
+  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-mode'], 'keep')
+  assert.equal(textOf(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0]), t('panel.mode.keep'), '按钮要写出当前模式')
+
+  // 第三次：回到隐藏，循环闭合
+  queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props.onClick()
+  await settle()
+  assert.ok(lastCommand(host, '/webtoggle mode web_search hide'))
 
   // 筛选框只影响列表，不发命令
   const before = host.state.calls.length
@@ -618,20 +611,20 @@ function expand(node) {
 // ---- 11. 设置页：全局面板，改的是配置而不是本会话状态 --------------------
 {
   storages.clear()
-  const host = fakeHost({ global: ['read', 'grep'] })
+  const host = fakeHost({ global: { read: 'keep', grep: 'keep' } })
   page.state.remote = host.remote
   const { render, t } = mountPage('settings.section')
   let tree = render()
   await settle()
   tree = render()
   tree = render()
-  assert.ok(lastCommand(host, '/webtoggle status'), '页面挂载时要问宿主状态')
-  assert.ok(lastCommand(host, '/webtoggle tools'), '页面挂载时要取工具目录')
+  assert.ok(lastCommand(host, '/webtoggle tools'), '页面挂载时只取一次目录')
+  assert.ok(!host.state.calls.some((call) => call[1] === '/webtoggle status'), '页面挂载不再多问一次状态')
   const panels = queryAll(tree, 'dswt-panel')
   assert.equal(panels.length, 1)
   assert.equal(panels[0].props['data-inline'], 'true', '页面里的面板应是内联的')
-  assert.equal(queryAll(toolRow(tree, 'read'), 'dswt-btn')[0].props['data-on'], 'true', '应显示全局保留的工具')
-  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-on'], 'false', '没保留的要显示为关')
+  assert.equal(queryAll(toolRow(tree, 'read'), 'dswt-btn')[0].props['data-mode'], 'keep', '应显示全局保留的工具')
+  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-mode'], 'hide', '联网工具要显示为隐藏')
   assert.equal(buttonWith(tree, t('panel.switchOff')), undefined, '全局面板不显示本会话开关')
 
   // 点「隐藏」改设置页自身
@@ -644,7 +637,7 @@ function expand(node) {
   assert.equal(tree, null, '关掉之后这个页面自己也不画了')
 
   // 换个入口把它重新打开：输入框那边取一次状态，页面就跟着回来
-  const reopened = fakeHost({ global: ['ops_bash'] })
+  const reopened = fakeHost({ global: { ops_bash: 'keep' } })
   page.state.remote = reopened.remote
   const composerAgain = mount('s11')
   const composerTree = composerAgain.render()
@@ -660,10 +653,11 @@ function expand(node) {
   // 全局长名单：点一下 bash 就写进 globalTools（命令带 --global）
   const bashRow = toolRow(pageTree, 'bash')
   assert.ok(bashRow !== undefined, '目录里应有 bash')
+  assert.equal(queryAll(bashRow, 'dswt-btn')[0].props['data-mode'], 'keep', 'bash 默认放行')
   queryAll(bashRow, 'dswt-btn')[0].props.onClick()
   await settle()
-  assert.ok(lastCommand(reopened, '/webtoggle keep bash on --global'), '全局面板要带 --global')
-  assert.ok(reopened.state.global.includes('bash'))
+  assert.ok(lastCommand(reopened, '/webtoggle mode bash hide --global'), '全局面板要带 --global')
+  assert.equal(reopened.state.global.bash, 'hide')
   console.log('11 设置页面板 ok')
 }
 

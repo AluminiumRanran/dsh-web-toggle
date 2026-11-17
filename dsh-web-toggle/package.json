@@ -1,7 +1,7 @@
 {
   "name": "dsh-web-toggle",
-  "version": "0.3.1",
-  "description": "按会话独立的联网开关：关掉后本会话的模型看不到 web_search / web_fetch、浏览器、MCP 等出网工具，shell 里的联网命令也会被拦下；带设置页、插件详情页与输入框小箭头三处可视化面板，可按会话配置保留的工具。Per-session web switch for DeepSeek Harness with a configuration panel.",
+  "version": "0.4.0",
+  "description": "按会话独立的联网开关：每个工具可选保留 / 隐藏 / 内容检查，断网时隐藏联网通道、通用执行器逐次查内容，其余工具照常放行；带输入框小箭头、设置页侧边栏与插件详情页三处面板，模式分层（本任务 / 全局 / 出厂）。Per-session web switch for DeepSeek Harness: keep / hide / inspect per tool, layered per session and globally.",
   "type": "module",
   "exports": {
     ".": "./index.js",

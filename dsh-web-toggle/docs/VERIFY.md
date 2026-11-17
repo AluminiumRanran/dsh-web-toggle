@@ -9,10 +9,10 @@ node tests/host.test.mjs     # Host 半侧状态机，用假的 ctx/agent
 node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + 假 remote
 ```
 
-`tests/host.test.mjs` 覆盖：
+`tests/host.test.mjs` 覆盖（16 组）：
 
 1. 初始状态 = 开（`status` 回 `[web:on]`，不加限制）
-2. `off` 生效：调用一次 `agent.ctx.tools.restrict({ allow: [...本地工具] })`（只给 allow，不给 deny），结果带 `[web:off]`
+2. `off` 生效：调用一次 `agent.ctx.tools.restrict({ deny: [...隐藏名单] })`（只给 deny，不给 allow），结果带 `[web:off]`
 3. 重复 `off` / 无参来回不叠加限制（restrict 只调用一次）
 4. `on` 精确调用一次 disposer，重复 `on` 不再 dispose
 5. 无参切换 on ⇄ off
@@ -21,33 +21,33 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 8. 非法参数回 error
 9. `agent/disposed` 触发时撤销限制并清记录；同一 sessionId 的新 agent 回到"开"
 10. `agent/pre-step`：变化后下一步返回 `startsRequestSeries: true`，只消费一次；`signal.aborted` 的步骤不消费标记
-11. 白名单内容：`ops_bash` / `web_*` / `bsk_*` / `computer_*` / `mcp__*` / `video_*` / `workbuddy_*` / `subagent` / `workflow` / `plugin_manager` / `schedule_create` 全部不在 allow 里；本地文件类工具在；未列入白名单的本地工具（`read`）也被隐藏（fail closed）；目录里没注册的名字被过滤而不是抛错
-
+11. 出厂三态分类：`web_*` / `bsk_*` / `computer_*` / `mcp__*` / `video_*` / `workbuddy_*` / `snowluma_*` 前缀与显式联网名 → `hide`；`ops_bash` → `inspect`；`read` / `write` / `ops_glob` / `acp_cache` 等 → `keep`；目录里没注册的名字被过滤而不是抛错
 12. shell 命令过滤：三层规则各拦一批（红队复现命令），同时放行日常本地命令
-13. 配置面：默认三个入口都开；`surface settings off` 落到配置且只写一次；`surface plugin off` 只回一句「始终显示」且不改配置；未知入口与缺值给用法错误；名单是完整名单（`allow add read` 后同时含内置项）、重复添加不重复、`--global` 基数取全局层且不污染会话、移除不等于清空、`allow clear --global`、`config` 输出含 `pluginPage=`；没有 configEditor 时如实回报 `没有配置文件可写` 与 `writable:false`
-14. 名单改动即时生效：断网状态下加白后是「新的 restrict + guard 上、旧的撤」，旧 disposer 被 lift；轮次正在执行时只存配置不下发并回执 `跳过 1`；恢复再断网时带上新名单
-15. 工具目录与 `keep`：`tools` 回 `[web-tools]`（按名字排序、含 `kept`/`builtIn`、来源 `default`）；`keep web_search on` 后来源变 `session` 且开关立刻变；`keep ops_bash off` 能关掉内置项；`keep reset` 删键回 `default`；`--global` 写全局层；不存在的名字不进目录并有提醒；断网时 `keep` 会立刻重新下发白名单
+13. 配置面：默认两个入口开、详情页恒开；`surface settings off` 落到配置且只写一次；`surface plugin off` 只回一句「始终显示」且不改配置；未知入口与缺值给用法错误；`mode` 与继承值相同则不落盘、`--global` 写全局层、`mode reset` 交还整层、`keep on|off` 与 `allow add|remove` 别名等价、`config` 输出含 `pluginPage=`；没有 configEditor 时如实回报 `没有配置文件可写` 与 `writable:false`
+14. 模式改动即时生效：断网状态下执行 `mode ops_bash keep` 后是「新的 restrict + guard 上、旧的撤」，旧 disposer 被 lift；轮次正在执行时只存配置不下发并回执 `跳过 1`；恢复再断网时带上新模式
+15. 工具目录与 `mode`：`tools` 回 `[web-tools]`（按名字排序、每行含 `mode`/`builtIn`）；`mode web_search keep` 后目录立刻变；`mode ops_bash keep` 之后不再注册 guard；`mode reset` 删键回默认；`--global` 写全局层；不存在的名字也进目录并有提醒
+16. 回执降噪：默认配置下 `status`/`off`/`mode` 的回执不带 `[web-state]` JSON，`tools` 永远带；错误信息完整且不带 JSON；`debug: true` 时成功回执才带机器标记
 
-`tests/client.test.mjs` 覆盖：
+`tests/client.test.mjs` 覆盖（14 组）：
 
 1. 默认亮态渲染（`data-off="false"`、`aria-pressed="true"`、标题 = `title.on`），无提示
-2. 槽位定义（`conversation.input.left` / id `web-toggle` / `locale web-toggle` / order 11）与样式表 effect 注册
+2. 槽位定义（`conversation.input.left` / id `web-toggle` / `locale web-toggle` / order 11）、`settings.section` 及其 `settings.section.icon`、样式表 effect 注册
 3. 点击 → `commands.execute(sessionId, '/webtoggle off', [])`（三个 wire 参数）→ 灭态 + 提示 + localStorage 记 `1`
 4. 记住 off 后重新挂载：先显示灭态，挂载探针 `status` 只发一次，**宿主确认关闭时不弹提示**；再点恢复发 `/webtoggle on` 并清记忆
 5. 切到别的会话再切回来（同一页面内重新挂载）：不重发 `status`、不弹提示，状态仍是灭态
 6. 轮次进行中：按钮 `disabled`，标题换成 `title.running`
 7. 失败分支：没有 remote、命令未注册（`value === undefined`）、Remote 报错、Host 明确拒绝（原文展示、状态不变）
 8. 挂载探针纠偏：记住 off 但宿主已重置 → 探针把显示改成亮态并提示 `note.syncedOn`
-9. 小箭头面板：点开时问 `status` 与 `tools` 各一次；「断网」发 `/webtoggle off`；工具行的开关发 `keep <name> on|off` 并跟着回执换态；筛选框只在本地过滤、不发命令
+9. 小箭头面板：点开时只发 `tools`（不发 `status`）；「断网」发 `/webtoggle off`；工具行按钮在 `hide → inspect → keep → hide` 循环（`data-mode` 与命令文本都跟着变）；筛选框只在本地过滤、不发命令
 10. 配置关掉小箭头后不再画箭头，开关本身照常
-11. 设置页面板：内联渲染、工具行的 `data-on` 反映全局名单、不画本会话开关；点「隐藏」发 `surface settings off`；关掉后页面自己 `return null`；从别处取回状态后画回来；工具开关带 `--global`
+11. 设置页面板：内联渲染、工具行的 `data-mode` 反映全局模式表、不画本会话开关；点「隐藏」发 `surface settings off`；关掉后页面自己 `return null`；从别处取回状态后画回来；工具模式命令带 `--global`
 12. 插件详情页只对本包渲染，别的包 `null`
 13. 配置页在没有 Remote 时如实报错
 14. 入口真卸载：宿主回报 `composer:false` 后 `conversation.input.left` 的槽位被注销（不是内容变空）；`plugins.detail.section` 仍在；从设置页打开后槽位重新注册
 
 ## 2. 安装结果
 
-- 包：`dsh-web-toggle@0.1.0` 首次装入，后续升级到 `0.2.0`（`file:E:/workspace/dsh-web-toggle-prompt-20261116/dsh-web-toggle`）
+- 包：`dsh-web-toggle`，从 `0.1.0` 一路升到 `0.4.0`（`file:E:/workspace/dsh-web-toggle-prompt-20261116/dsh-web-toggle`）
 - 走的是 `plugin_manager install_bundle`，结果 `application: "applied"`、`enabled: true`
 - profile 里新增：`dependencies.dsh-web-toggle`、`dsh.profile.bundles` 里的 `dsh-web-toggle`
 - 备份：`tmp/profile-backup-20261117-115656/`（package.json / pnpm-lock.yaml / cordis.patch.yml）
@@ -59,16 +59,16 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 离线测试证明不了"真实内核里工具真的消失"，这几条要在真机上点一遍：
 
 - [ ] 刷新页面（必要时重启 DSH）后，输入框工具栏出现「联网」按钮，没有斜线
-- [ ] 点一下：按钮变灭态，命令回执里带 `[web:off]`
-- [ ] 同会话下一轮：模型工具列表只剩本地工具（`web_*`、`ops_bash`、`bsk_*`、`mcp__*` 都消失），本地读写照常可用
+- [ ] 点一下：按钮变灭态，命令回执只有一句人话（不再刷 JSON）
+- [ ] 同会话下一轮：`hide` 的工具（`web_*`、`bsk_*`、`mcp__*` 等）从工具列表消失；`keep` 的本地工具照常可用；`ops_bash` 仍在但联网命令被拦
 - [ ] 另一个会话的按钮仍是亮态，可以正常联网
-- [ ] 再点一下恢复，下一轮又能联网
-- [ ] 设置页侧边栏出现「联网开关」，插件详情页出现同样的面板；两处改配置后输入框那一侧立即跟着变
+- [ ] 再点一下恢复，下一轮工具回来
+- [ ] 设置页侧边栏出现「联网开关」（地球图标，不是齿轮），插件详情页出现同样的面板；两处改模式后输入框那一侧立即跟着变
 - [ ] 小箭头浮层贴在输入框卡片的正上方、左边缘与卡片对齐，不压在输入框文字上
 - [ ] 深色与浅色主题下，浮层的底色、描边、文字都跟着界面走（不是固定的白底）
-- [ ] 设置页侧边栏里本插件用的是地球图标，不是通用齿轮
-- [ ] 小箭头能打开本会话面板；在里面加一个工具名后，断网时的工具表里多出它（下一轮生效）
-- [ ] 关掉某个入口后刷新页面，该入口不再出现，其余照常
+- [ ] 小箭头里把某个 `keep` 的工具切成 `hide`，下一轮它真的消失；再切回 `keep` 又回来
+- [ ] 把一个 `hide` 的工具切成 `inspect`，下一轮它可见、且调用时被内容检查（回执带拒绝理由）
+- [ ] 关掉某个入口后刷新页面，该入口不再出现（不是只变空白），其余照常
 - [ ] 宿主控制台没有 `tools.restrict() requires a scoped context` / `names unknown global tool` 这类报错
 - [ ] 重启 DSH 后按钮不报错；若重启前是灭态，刷新后按钮会先向宿主探一次并如实纠正显示
 
@@ -80,4 +80,10 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 - `command/done`：12:04:00 / 12:04:01 / 12:04:51 / 12:04:54 连点，回执尾部依次 `[web:off]` → `[web:on]` → `[web:off]` → `[web:on]` → `[web:off]`，最终停在关闭。
 - 全程没有 `tools.restrict() requires a scoped context`、没有 `names unknown global tool`。
 
-因此第 3 节里「点一下 → 回执带标记」「下一轮工具消失」「无 restrict 报错」三条已由日志确认；其余仍然需要人眼在界面上看一眼。
+因此第 3 节里「点一下 → 回执」「下一轮工具消失」「无 restrict 报错」三条已由日志确认；其余仍然需要人眼在界面上看一眼。
+
+## 声明
+
+本插件使用 AI 辅助完成（设计、实现、测试与文档均由人和 AI 协作产出，并经真机红队测试）。
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)

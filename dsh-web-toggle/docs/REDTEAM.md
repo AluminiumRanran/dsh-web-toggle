@@ -29,7 +29,7 @@
 
 ## 本插件的应对（同日）
 
-- 保持**单一断网模式**：`/webtoggle off` 隐藏网页搜索、浏览器、MCP、生图/视频、子代理、插件管理、定时任务；`ops_bash` 保留，用 `tools.guard()` 拦"看起来在联网"的命令。
+- 保持**单一断网模式**：`/webtoggle off` 时，标成 `hide` 的工具（出厂默认：网页搜索、浏览器、MCP、生图/视频、子代理、插件管理、定时任务）从工具列表里消失；`ops_bash` 标成 `inspect`，保留可见但用 `tools.guard()` 拦"看起来在联网"的命令。模式可以逐个改，所以这张表不再写死（`0.4.0` 起）。
 - 之所以不把 shell 一起隐藏：跑测试、构建、搬文件都要它；藏了等于这一轮干不了活。这个取舍是用户定的。
 - 因此**红队那三条绕过路径依然成立**（`python socket+ssl`、`npm pack`、PowerShell 拼 URL 都只是"看起来不像联网"）。它们不是 bug，是文本闸门的已知上限；真要断，只能走网络层。
 - 真·网络层：内核没有按会话断网的能力（`dsh-sandbox-local` 只约束文件系统，Windows 侧用受限令牌做 ACL，不含网络规则）。要做只能脱离插件：WFP 按用户/进程加规则（全局，波及别的会话）、AppContainer 无 `internetClient` 运行工具（需要把执行层搬进容器）、或在无网 VM 里跑整个 DSH。
@@ -210,3 +210,9 @@ echo 'GET / HTTP/1.1'       # 放行
 | 编译器产出联网二进制（gcc/rustc/…） | 文本层只看到"编译"，看不到产物行为 |
 | 已在运行的进程、计划任务、服务 | 闸门只在新起命令这一步 |
 | 解释器里 `exec` 解码后的动态载荷（`b64decode`/`fromhex` 已拦，但 `codecs`、`zlib`、自定义解码仍可能） | 同第一条：解码发生在运行时 |
+
+## 声明
+
+本插件使用 AI 辅助完成（设计、实现、测试与文档均由人和 AI 协作产出）。本节的红队记录由用户侧执行，结论原样保留，包括仍然拦不住的部分。
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
