@@ -21,6 +21,12 @@ window.__ModuleLoader__.load({
     const STYLE_ID = 'dsh-web-toggle/styles'
     /** Browser-local per-Session state: `1` means the switch is off. */
     const STORAGE_PREFIX = 'dsh-web-toggle:off:'
+    /**
+     * Sessions already reconciled with the Host in this page. Kept outside the
+     * component so switching away and back neither re-runs `/webtoggle status` nor
+     * re-raises the "the host restarted" note; a real page reload clears it.
+     */
+    const probedSessions = new Set()
     /** How long a settled note stays in the tool row. */
     const NOTE_MS = 9000
 
@@ -53,8 +59,6 @@ window.__ModuleLoader__.load({
         'note.offTitle': 'This task no longer has web_search or web_fetch; the next request carries the shorter tool list.',
         'note.on': 'Web on',
         'note.onTitle': 'web_search and web_fetch are back in this task\u2019s tool list from the next request.',
-        'note.syncedOff': 'Web off (kept)',
-        'note.syncedOffTitle': 'The host reports this task\u2019s web tools are still off.',
         'note.syncedOn': 'Web on',
         'note.syncedOnTitle': 'The host restarted, so this task\u2019s web tools are on again.',
         'error.noRemote': 'The command service is unavailable on this page, so the switch cannot change anything.',
@@ -74,8 +78,6 @@ window.__ModuleLoader__.load({
         'note.offTitle': '本任务不再有 web_search / web_fetch，下一次请求带的就是精简后的工具列表。',
         'note.on': '联网已开启',
         'note.onTitle': 'web_search / web_fetch 从下一次请求起回到本任务的工具列表。',
-        'note.syncedOff': '联网已关闭（保持）',
-        'note.syncedOffTitle': '宿主报告本任务的联网工具仍处于关闭状态。',
         'note.syncedOn': '联网已开启',
         'note.syncedOnTitle': '宿主已重启，本任务的联网工具因此恢复开启。',
         'error.noRemote': '当前页面无法使用命令服务，开关改不了任何东西。',
@@ -209,6 +211,9 @@ window.__ModuleLoader__.load({
         const commit = (nextOff) => {
           setOff(nextOff)
           writePreference(sessionId, nextOff)
+          // The Host just answered for this Session, so a later re-mount does not need
+          // to ask it again.
+          if (sessionId !== undefined) probedSessions.add(sessionId)
         }
 
         /**
@@ -267,21 +272,26 @@ window.__ModuleLoader__.load({
         }
 
         // The Host forgets the switch when DSH restarts while this browser remembers it.
-        // One `/webtoggle status` reconciles that case; a remembered "on" needs no probe.
+        // One `/webtoggle status` reconciles that case; a remembered "on" needs no probe,
+        // and a Session already probed in this page is not probed again — switching away
+        // and back must not fire the command or a note every time.
         useEffect(() => {
           if (sessionId === undefined || running) return undefined
           if (!readPreference(sessionId)) return undefined
+          if (probedSessions.has(sessionId)) return undefined
           let cancelled = false
           const timer = window.setTimeout(async () => {
             const remote = remoteOf()
             const commands = remote === undefined ? undefined : remote.commands
             if (cancelled || commands === undefined || typeof commands.execute !== 'function') return
+            probedSessions.add(sessionId)
             const before = readPreference(sessionId)
             const answered = await invoke('status', true)
             if (cancelled || !answered || !aliveRef.current) return
             const after = readPreference(sessionId)
+            // Only a correction deserves a note: when the Host confirms the remembered
+            // "off", the button already shows it and silence is the honest answer.
             if (before && !after) setNote({ kind: 'ok', text: t('note.syncedOn'), title: t('note.syncedOnTitle') })
-            else if (before && after) setNote({ kind: 'ok', text: t('note.syncedOff'), title: t('note.syncedOffTitle') })
           }, 0)
           return () => {
             cancelled = true

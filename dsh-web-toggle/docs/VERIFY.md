@@ -27,10 +27,11 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 1. 默认亮态渲染（`data-off="false"`、`aria-pressed="true"`、标题 = `title.on`），无提示
 2. 槽位定义（`conversation.input.left` / id `web-toggle` / `locale web-toggle` / order 11）与样式表 effect 注册
 3. 点击 → `commands.execute(sessionId, '/webtoggle off', [])`（三个 wire 参数）→ 灭态 + 提示 + localStorage 记 `1`
-4. 记住 off 后重新挂载：先显示灭态，挂载探针 `status` 只发一次，宿主确认关闭时保持；再点恢复发 `/webtoggle on` 并清记忆
-5. 轮次进行中：按钮 `disabled`，标题换成 `title.running`
-6. 失败分支：没有 remote、命令未注册（`value === undefined`）、Remote 报错、Host 明确拒绝（原文展示、状态不变）
-7. 挂载探针纠偏：记住 off 但宿主已重置 → 探针把显示改成亮态并提示 `note.syncedOn`
+4. 记住 off 后重新挂载：先显示灭态，挂载探针 `status` 只发一次，**宿主确认关闭时不弹提示**；再点恢复发 `/webtoggle on` 并清记忆
+5. 切到别的会话再切回来（同一页面内重新挂载）：不重发 `status`、不弹提示，状态仍是灭态
+6. 轮次进行中：按钮 `disabled`，标题换成 `title.running`
+7. 失败分支：没有 remote、命令未注册（`value === undefined`）、Remote 报错、Host 明确拒绝（原文展示、状态不变）
+8. 挂载探针纠偏：记住 off 但宿主已重置 → 探针把显示改成亮态并提示 `note.syncedOn`
 
 ## 2. 安装结果
 
@@ -52,3 +53,13 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 - [ ] 再点一下恢复，下一轮又能联网
 - [ ] 宿主控制台没有 `tools.restrict() requires a scoped context` / `names unknown global tool` 这类报错
 - [ ] 重启 DSH 后按钮不报错；若重启前是灭态，刷新后按钮会先向宿主探一次并如实纠正显示
+
+## 4. 真机证据（2026-11-17，本机 DSH 0.2.2-rc.3）
+
+来源：本会话日志 `C:\Users\Aluminium\.dsh\sessions\--E-workspace--\session-4d5c4520-1cdc-44b5-be11-86a5e3f39958\session.v4.jsonl.zstd`（zstd，`zlib.zstdDecompressSync` 解）。
+
+- `request/header`：11:48 首请求 **105** 个工具（含 `web_search` / `web_fetch`）；11:57 两次 `reason:"change"` 仍是 105；**12:05:06 本轮 103 个、无 `web_*` 且 `startsSeries: true`** —— 遮罩生效，请求序列确实被重建。
+- `command/done`：12:04:00 / 12:04:01 / 12:04:51 / 12:04:54 连点，回执尾部依次 `[web:off]` → `[web:on]` → `[web:off]` → `[web:on]` → `[web:off]`，最终停在关闭。
+- 全程没有 `tools.restrict() requires a scoped context`、没有 `names unknown global tool`。
+
+因此第 3 节里「点一下 → 回执带标记」「下一轮工具消失」「无 restrict 报错」三条已由日志确认；其余仍然需要人眼在界面上看一眼。

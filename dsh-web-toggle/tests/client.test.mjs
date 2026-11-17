@@ -29,13 +29,17 @@ const flushTimers = () => {
   for (const fn of pending) fn()
 }
 
-// ---- 极简 React 打桩（每个"挂载"一套，模拟一个组件实例） -----------------
-const makeReact = () => {
+// ---- 极简 React 打桩 ------------------------------------------------------
+// 真实环境里 client.js 的 factory 只在页面加载时执行一次，之后切会话是组件重挂载。
+// 所以这里：factory 只跑一次（模块级缓存共享），每次 mount 只换一套 hook 池。
+const makePool = () => {
   const values = new Map()
   const effects = new Map()
   let cursor = 0
-  const stub = {
-    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
+  return {
+    begin() {
+      cursor = 0
+    },
     useState(initial) {
       const index = cursor++
       if (!values.has(index)) values.set(index, typeof initial === 'function' ? initial() : initial)
@@ -59,11 +63,14 @@ const makeReact = () => {
       effects.set(index, { deps })
       run()
     },
-    begin() {
-      cursor = 0
-    },
   }
-  return stub
+}
+let currentPool
+const React = {
+  createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
+  useState: (initial) => currentPool.useState(initial),
+  useRef: (initial) => currentPool.useRef(initial),
+  useEffect: (run, deps) => currentPool.useEffect(run, deps),
 }
 
 // ---- 载入 client.js（只用它交给 ModuleLoader 的描述） ---------------------
@@ -77,14 +84,10 @@ await import('../client.js')
 assert.ok(loadedModule !== undefined, 'client.js 应调用 __ModuleLoader__.load')
 assert.equal(loadedModule.id, 'dsh-web-toggle', '浏览器模块 id 必须等于包名')
 
-/**
- * 挂载一次：新的 hook 池 + 新的假 ctx（locale / slots / effect），返回渲染器。
- * 同一个 runtime 内多次 render 共享状态，等价于同一个组件实例的重渲染。
- */
-function mount() {
-  const react = makeReact()
+// —— 页面级单例：factory 一次、apply 一次，等价于同一个页面活到测试结束 ——
+const page = (() => {
   const moduleExports = loadedModule.factory((name) => {
-    if (name === 'react') return react
+    if (name === 'react') return React
     throw new Error(`unexpected require: ${name}`)
   })
   assert.deepEqual(moduleExports.inject, ['slots', 'locale', 'remote', 'remote.commands'])
@@ -129,19 +132,41 @@ function mount() {
     },
   }
   moduleExports.apply(ctx)
-
   const t = (key) => dictionary[key] ?? key
+  return { state, dictionary, t }
+})()
+
+/**
+ * 挂载一次组件实例：新的 hook 池，会话 id 可变。
+ * 模块级状态（已探过的会话等）与 page 单例一起跨 mount 保留，正好模拟切走再切回。
+ */
+function mount(sessionId = 'session-a') {
+  currentPool = makePool()
   const render = (props) => {
-    react.begin()
-    return state.component({ t, sessionId: 'session-a', useSessions: (selector) => selector({ byId: {} }), ...props })
+    currentPool.begin()
+    return page.state.component({
+      t: page.t,
+      sessionId,
+      useSessions: (selector) => selector({ byId: {} }),
+      ...props,
+    })
   }
-  return { state, dictionary, render, t }
+  return { state: page.state, dictionary: page.dictionary, render, t: page.t }
 }
+/** 一个回固定结果的假 remote，同时记录每次调用。 */
+const stubRemote = (calls, text) => ({
+  commands: {
+    execute: async (...args) => {
+      calls.push(args)
+      return { ok: true, value: { result: { kind: 'success', text } } }
+    },
+  },
+})
 
 // ---- 1. 默认渲染：亮着 -----------------------------------------------------
 {
   storages.clear()
-  const { render, t } = mount()
+  const { render, t } = mount('s1')
   const tree = render({})
   const button = tree.children[0]
   assert.equal(tree.props['data-off'], 'false')
@@ -153,7 +178,7 @@ function mount() {
 
 // ---- 2. 槽位定义与样式表 ---------------------------------------------------
 {
-  const { state, t } = mount()
+  const { state, t } = mount('s2')
   assert.equal(state.slot.name, 'conversation.input.left')
   assert.equal(state.slot.id, 'web-toggle')
   assert.equal(state.slot.locale, 'web-toggle')
@@ -167,46 +192,32 @@ function mount() {
 // ---- 3. 点一次：发 off，灭态 + 提示，并记住 ------------------------------
 {
   storages.clear()
-  const { state, render, dictionary } = mount()
+  const { state, render, dictionary } = mount('s3')
   const calls = []
-  state.remote = {
-    commands: {
-      execute: async (...args) => {
-        calls.push(args)
-        return { ok: true, value: { result: { kind: 'success', text: '联网工具已关闭 [web:off]' } } }
-      },
-    },
-  }
+  state.remote = stubRemote(calls, '联网工具已关闭 [web:off]')
   let tree = render({})
   tree.children[0].props.onClick()
   await Promise.resolve()
   await Promise.resolve()
   assert.equal(calls.length, 1)
   assert.equal(calls[0].length, 3, 'execute 应带三个 wire 参数')
-  assert.deepEqual(calls[0].slice(0, 2), ['session-a', '/webtoggle off'])
+  assert.deepEqual(calls[0].slice(0, 2), ['s3', '/webtoggle off'])
   tree = render({})
   assert.equal(tree.props['data-off'], 'true')
   assert.equal(tree.children[0].props['aria-pressed'], 'false')
-  assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:session-a'), '1', '应记住 off')
+  assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:s3'), '1', '应记住 off')
   assert.equal(tree.children[1].props['data-kind'], 'ok')
   assert.equal(tree.children[1].children[0], dictionary['note.off'])
   console.log('3 关闭流程 ok')
 }
 
-// ---- 4. 记住 off 后重新挂载：先显示灭态，再点恢复 ------------------------
+// ---- 4. 记住 off 后重新挂载：显示灭态、探针只发一次、宿主确认时不出提示 --
 {
   storages.clear()
-  globalThis.localStorage.setItem('dsh-web-toggle:off:session-a', '1')
-  let calls = []
-  const first = mount()
-  first.state.remote = {
-    commands: {
-      execute: async (...args) => {
-        calls.push(args)
-        return { ok: true, value: { result: { kind: 'success', text: '本来就是关闭的 [web:off]' } } }
-      },
-    },
-  }
+  globalThis.localStorage.setItem('dsh-web-toggle:off:s4', '1')
+  const calls = []
+  const first = mount('s4')
+  first.state.remote = stubRemote(calls, '本来就是关闭的 [web:off]')
   let tree = first.render({})
   assert.equal(tree.props['data-off'], 'true', '应读回记住的状态')
   flushTimers()
@@ -215,47 +226,69 @@ function mount() {
   await Promise.resolve()
   assert.equal(calls.length, 1, '挂载应只探一次')
   assert.equal(calls[0][1], '/webtoggle status')
-  assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:session-a'), '1', '宿主确认关闭时保持不变')
+  tree = first.render({})
+  assert.equal(tree.props['data-off'], 'true')
+  assert.equal(tree.children[1], null, '宿主确认仍是关闭时不应弹提示（切来切去不再重复出现）')
 
   // 再点一次 → on
-  calls = []
-  first.state.remote = {
-    commands: {
-      execute: async (...args) => {
-        calls.push(args)
-        return { ok: true, value: { result: { kind: 'success', text: '联网工具已恢复 [web:on]' } } }
-      },
-    },
-  }
+  const onCalls = []
+  first.state.remote = stubRemote(onCalls, '联网工具已恢复 [web:on]')
   tree.children[0].props.onClick()
   await Promise.resolve()
   await Promise.resolve()
-  assert.equal(calls[0][1], '/webtoggle on')
+  assert.equal(onCalls[0][1], '/webtoggle on')
   tree = first.render({})
   assert.equal(tree.props['data-off'], 'false')
-  assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:session-a'), null)
+  assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:s4'), null)
   console.log('4 重新挂载与恢复 ok')
 }
 
-// ---- 5. 轮次进行中：按钮禁用、点了也不发命令 -----------------------------
+// ---- 5. 切走再切回：不重发 status、不再弹提示 ---------------------------
 {
   storages.clear()
-  const { state, render, t } = mount()
+  globalThis.localStorage.setItem('dsh-web-toggle:off:s5', '1')
+  const firstCalls = []
+  const first = mount('s5')
+  first.state.remote = stubRemote(firstCalls, '本来就是关闭的 [web:off]')
+  first.render({})
+  flushTimers()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(firstCalls.length, 1)
+
+  // 模拟切到别的会话再切回来：组件重新挂载，模块级缓存还在
+  const secondCalls = []
+  const second = mount('s5')
+  second.state.remote = stubRemote(secondCalls, '本来就是关闭的 [web:off]')
+  const tree = second.render({})
+  flushTimers()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(secondCalls.length, 0, '同一页面内不应重复探测')
+  assert.equal(tree.props['data-off'], 'true')
+  assert.equal(tree.children[1], null, '不应再次弹提示')
+  console.log('5 切走切回不重复提示 ok')
+}
+
+// ---- 6. 轮次进行中：按钮禁用、点了也不发命令 -----------------------------
+{
+  storages.clear()
+  const { state, render, t } = mount('s6')
   let called = 0
   state.remote = { commands: { execute: async () => (called++, { ok: true, value: { result: { kind: 'success', text: '[web:on]' } } }) } }
-  const tree = render({ useSessions: (selector) => selector({ byId: { 'session-a': { running: true } } }) })
+  const tree = render({ useSessions: (selector) => selector({ byId: { s6: { running: true } } }) })
   assert.equal(tree.children[0].props.disabled, true)
   assert.equal(tree.children[0].props.title, t('title.running'))
   assert.equal(called, 0)
-  console.log('5 运行中禁用 ok')
+  console.log('6 运行中禁用 ok')
 }
 
-// ---- 6. 失败分支 ---------------------------------------------------------
+// ---- 7. 失败分支 ---------------------------------------------------------
 {
   storages.clear()
-  const { state, render, t } = mount()
+  const { state, render, t } = mount('s7')
 
-  // 6.1 没有 remote
+  // 7.1 没有 remote
   state.remote = undefined
   let tree = render({})
   tree.children[0].props.onClick()
@@ -264,7 +297,7 @@ function mount() {
   assert.equal(tree.children[1].props['data-kind'], 'error')
   assert.equal(tree.children[1].children[0], t('error.noRemote'))
 
-  // 6.2 命令未注册（value undefined）
+  // 7.2 命令未注册（value undefined）
   state.remote = { commands: { execute: async () => ({ ok: true, value: undefined }) } }
   tree = render({})
   tree.children[0].props.onClick()
@@ -273,7 +306,7 @@ function mount() {
   tree = render({})
   assert.equal(tree.children[1].children[0], t('error.commandMissing'))
 
-  // 6.3 Remote 失败
+  // 7.3 Remote 失败
   state.remote = { commands: { execute: async () => ({ ok: false, error: { message: 'socket closed' } }) } }
   tree = render({})
   tree.children[0].props.onClick()
@@ -282,7 +315,7 @@ function mount() {
   tree = render({})
   assert.match(tree.children[1].children[0], /socket closed/)
 
-  // 6.4 Host 明确拒绝：原文展示，状态不变
+  // 7.4 Host 明确拒绝：原文展示，状态不变
   state.remote = {
     commands: {
       execute: async () => ({ ok: true, value: { result: { kind: 'error', text: '当前任务正在执行，等这一轮结束后再切换联网开关' } } }),
@@ -295,35 +328,28 @@ function mount() {
   tree = render({})
   assert.equal(tree.children[1].children[0], '当前任务正在执行，等这一轮结束后再切换联网开关')
   assert.equal(tree.props['data-off'], 'false', '被拒绝时状态不变')
-  console.log('6 失败分支 ok')
+  console.log('7 失败分支 ok')
 }
 
-// ---- 7. 挂载探针：记住 off 但宿主已重置 → 自动纠正成亮态 ----------------
+// ---- 8. 挂载探针：记住 off 但宿主已重置 → 纠正成亮态并提示 -------------
 {
   storages.clear()
-  globalThis.localStorage.setItem('dsh-web-toggle:off:session-a', '1')
-  const { state, render, t } = mount()
+  globalThis.localStorage.setItem('dsh-web-toggle:off:s8', '1')
+  const { state, render, t } = mount('s8')
   const calls = []
-  state.remote = {
-    commands: {
-      execute: async (...args) => {
-        calls.push(args)
-        return { ok: true, value: { result: { kind: 'success', text: '本来就是开启的 [web:on]' } } }
-      },
-    },
-  }
+  state.remote = stubRemote(calls, '本来就是开启的 [web:on]')
   let tree = render({})
   flushTimers()
   await Promise.resolve()
   await Promise.resolve()
   assert.equal(calls.length, 1)
   assert.equal(calls[0][1], '/webtoggle status')
-  assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:session-a'), null, '应把记忆纠正成 on')
+  assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:s8'), null, '应把记忆纠正成 on')
   tree = render({})
   assert.equal(tree.props['data-off'], 'false')
   assert.equal(tree.children[1].props['data-kind'], 'ok')
   assert.equal(tree.children[1].children[0], t('note.syncedOn'))
-  console.log('7 挂载探针纠正 ok')
+  console.log('8 挂载探针纠正 ok')
 }
 
 console.log('\n全部通过')
