@@ -427,6 +427,8 @@ function makeConfigCtx(initial = {}) {
     composerPanel: true,
     toolModes: {},
     sessionModes: {},
+    offSessions: {},
+    knownTools: [],
     debug: true,
     ...initial,
   }
@@ -711,6 +713,38 @@ function makeConfigCtx(initial = {}) {
   assert.equal(loudError.kind, 'error')
   assert.match(loudError.text, /\[web-state\]/, 'debug 模式的错误也带状态，便于贴出来')
   console.log('16 默认回执安静 / debug 才带机器标记 ok')
+}
+
+// 17. 配置即状态：面板写进 offSessions 的开关，在下一轮请求前自动落到工具表上
+{
+  const { ctx: configCtx, listeners: configListeners, values, config } = makeConfigCtx({ offSessions: { cfg1: true } })
+  apply(configCtx, config)
+  const preStep = configListeners.get('agent/pre-step')
+  assert.equal(typeof preStep, 'function', '应监听 agent/pre-step')
+  const { agent, restrictions, disposals } = makeAgent('cfg1')
+  const decision = { kind: 'enter', messages: [{ role: 'user' }] }
+  const step = () => preStep({ agent, signal: { aborted: false } }, async () => decision)
+
+  // 配置说这个会话断网：不等任何人敲命令，开轮前就要把限制装上。
+  const first = await step()
+  assert.equal(restrictions.length, 1, '配置里的 off 要变成真的限制')
+  assert.ok(restrictions[0].deny.includes('web_search'), '限制内容按模式算')
+  assert.equal(first.startsRequestSeries, true, '工具表变了就要重建请求序列')
+
+  // 下一轮：已经一致，不重复下发、也不重建。
+  const second = await step()
+  assert.equal(restrictions.length, 1, '状态一致时不重复下发')
+  assert.equal(second.startsRequestSeries, undefined, '没有变化就不重建序列')
+
+  // 配置改回联网：下一轮撤掉限制。
+  values.offSessions = {}
+  await step()
+  assert.ok(disposals.includes('lifted'), '配置改回 on 时要撤掉限制')
+
+  // 顺带把目录记进配置，面板读它画列表；不变时不重复写。
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.ok(Array.isArray(values.knownTools) && values.knownTools.includes('web_search'), '目录要记进配置')
+  console.log('17 配置即状态（自动下发 / 自动撤销） ok')
 }
 
 console.log('\n全部通过')

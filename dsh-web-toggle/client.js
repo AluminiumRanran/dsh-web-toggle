@@ -166,6 +166,9 @@ window.__ModuleLoader__.load({
         'note.offTitle': 'The internet-facing tools are hidden from the next request; shell commands that would fetch anything are refused.',
         'note.on': 'Network on',
         'note.onTitle': 'The full tool list is back in this task from the next request.',
+        'note.saved': 'Saved',
+        'error.badInput': 'That is not a form this panel sends.',
+        'error.noConfig': 'The Host has no configuration row for this plugin, so the panel cannot save.',
         'note.syncedOn': 'Network on',
         'note.syncedOnTitle': 'The host restarted, so this task can reach the internet again.',
         'error.noRemote': 'The command service is unavailable on this page, so the switch cannot change anything.',
@@ -227,6 +230,9 @@ window.__ModuleLoader__.load({
         'note.offTitle': '从下一次请求起，能出网的工具都被隐藏，shell 里的联网命令会被拦。',
         'note.on': '已联网',
         'note.onTitle': '完整工具列表从下一次请求起回到本任务。',
+        'note.saved': '已保存',
+        'error.badInput': '面板不认识这条写法。',
+        'error.noConfig': '宿主里找不到本插件的配置行，面板改不了。',
         'note.syncedOn': '已联网',
         'note.syncedOnTitle': '宿主已重启，本任务因此恢复联网。',
         'error.noRemote': '当前页面无法使用命令服务，开关改不了任何东西。',
@@ -470,6 +476,7 @@ window.__ModuleLoader__.load({
       if (word === 'keep' || word === 'on' || word === 'true' || word === '1' || word === 'show' || word === 'yes') return 'keep'
       if (word === 'hide' || word === 'off' || word === 'false' || word === '0' || word === 'drop' || word === 'no') return 'hide'
       if (word === 'inspect' || word === 'check' || word === 'scan' || word === 'match' || word === 'pattern') return 'inspect'
+      if (word === 'refuse' || word === 'reject' || word === 'block' || word === 'blocked' || word === 'deny') return 'refuse'
       return undefined
     }
 
@@ -555,44 +562,205 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Run one `/webtoggle` line and turn the answer into a small outcome record.
-       * @param sessionId - the Session the command runs for.
-       * @param rawInput - the argument text behind `/webtoggle `.
+       * 一条按钮改动怎么写进配置、怎么读回来。
+       *
+       * 面板里的每次点击都必须静默：走命令会在聊天里留一条 `> webtoggle · …` 回执，
+       * 而写配置不会。于是事实来源是配置（`settings` 服务的插件那一行），宿主在每轮
+       * 请求前把配置落到 `restrict` / `guard` 上。
+       */
+      const SETTINGS_NS = 'web-toggle'
+      /** 三个入口在配置里对应的字段。 */
+      const SURFACE_FIELDS = Object.freeze({ plugin: 'pluginPage', settings: 'settingsSection', composer: 'composerPanel' })
+      /** 出厂就带「内容检查」的工具：双用途的那个 shell。 */
+      const INSPECT_NAME = 'ops_bash'
+      /** 名字以这些前缀开头的工具，出厂按「隐藏」处理。 */
+      const HIDE_PREFIXES = ['web_', 'bsk_', 'computer_', 'mcp__', 'video_', 'workbuddy_', 'snowluma_']
+      /** 逐个点名隐藏的工具（前缀覆盖不到的联网 / 间接联网通道）。 */
+      const DEFAULT_HIDE = new Set([
+        'list_mcp_resource_templates', 'list_mcp_resources', 'plugin_manager', 'read_mcp_resource',
+        'schedule_create', 'schedule_edit', 'send_message', 'subagent', 'subagent_fork',
+        'wait_agent', 'workflow',
+      ])
+      /** 面板里先摆出来的名字：没有完整工具表时的最小可用集合。 */
+      const SUGGESTED = [
+        'web_search', 'web_fetch', 'ops_bash', 'computer_use_activate', 'subagent',
+        'send_message', 'workflow', 'plugin_manager', 'video_storyboard', 'workbuddy_draw_image',
+      ]
+
+      /** 出厂就带意见的工具返回那个模式，其余返回 undefined。 */
+      const curatedMode = (name) => {
+        const text = typeof name === 'string' ? name : ''
+        if (text === INSPECT_NAME) return 'inspect'
+        for (const prefix of HIDE_PREFIXES) if (text.startsWith(prefix)) return 'hide'
+        if (DEFAULT_HIDE.has(text)) return 'hide'
+        return undefined
+      }
+
+      /** 没有配置时这个工具是什么模式（与宿主 `defaultMode` 一致）。 */
+      const defaultModeFor = (name) => curatedMode(name) ?? 'inspect'
+
+      /** The `settings` Remote namespace, or undefined when the Host has none. */
+      const settingsFace = () => {
+        const remote = remoteOf()
+        const settings = remote === undefined ? undefined : remote.settings
+        return settings !== undefined && typeof settings.describe === 'function' && typeof settings.mutate === 'function'
+          ? settings
+          : undefined
+      }
+
+      /** 这条配置行看起来是不是本插件的。 */
+      const isOurs = (entry) => {
+        const value = entry?.value
+        if (value === null || typeof value !== 'object') return false
+        return value.toolModes !== undefined || value.sessionModes !== undefined
+          || value.offSessions !== undefined || value.composerPanel !== undefined
+      }
+
+      /** 读一遍配置：拿到本插件那一行（值、可写性、revision）。 */
+      async function readFace(t) {
+        const face = settingsFace()
+        if (face === undefined) return { ok: false, text: t('error.noRemote') }
+        try {
+          const response = await face.describe({ redactSecrets: true })
+          if (response === undefined || response.ok !== true) {
+            return { ok: false, text: format(t('error.failed'), { reason: describeFailure(response === undefined ? undefined : response.error, t) }) }
+          }
+          const value = response.value !== null && typeof response.value === 'object' ? response.value : {}
+          const list = Array.isArray(value.namespaces) ? value.namespaces : []
+          const view = list.find((entry) => entry !== null && typeof entry === 'object' && entry.ns === SETTINGS_NS)
+            ?? list.find((entry) => entry !== null && typeof entry === 'object' && isOurs(entry))
+          if (view === undefined) return { ok: false, text: t('error.noConfig') }
+          return { ok: true, view, writable: value.writable !== false }
+        } catch (error) {
+          return { ok: false, text: format(t('error.failed'), { reason: describeFailure(error, t) }) }
+        }
+      }
+
+      /** 把一层「名字 → 模式」读成干净的表。 */
+      const modesIn = (raw) => {
+        const out = {}
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return out
+        for (const [name, mode] of Object.entries(raw)) {
+          if (typeof name === 'string' && typeof mode === 'string') out[name] = mode
+        }
+        return out
+      }
+
+      /** 从配置行推出面板要画的状态。 */
+      const stateFrom = (view, sessionId, writable) => {
+        const value = view !== null && typeof view === 'object' && view.value !== null && typeof view.value === 'object' ? view.value : {}
+        const sessionModes = value.sessionModes !== null && typeof value.sessionModes === 'object' ? value.sessionModes : {}
+        return {
+          off: sessionId !== undefined && value.offSessions !== null && typeof value.offSessions === 'object' && value.offSessions[sessionId] === true,
+          surfaces: {
+            plugin: true,
+            settings: value.settingsSection !== false,
+            composer: value.composerPanel !== false,
+          },
+          global: modesIn(value.toolModes),
+          session: sessionId === undefined ? {} : modesIn(sessionModes[sessionId]),
+          writable: writable !== false,
+        }
+      }
+
+      /** 面板列出的工具：配置里的 + 上次读到的完整目录 + 出厂建议。 */
+      const catalogueFrom = (view, sessionId) => {
+        const state = stateFrom(view, sessionId, true)
+        const value = view !== null && typeof view === 'object' && view.value !== null && typeof view.value === 'object' ? view.value : {}
+        // 宿主每轮把工具目录记进 knownTools：这是完整列表，且读它不用发命令。
+        const known = Array.isArray(value.knownTools) ? value.knownTools.filter((name) => typeof name === 'string') : []
+        const names = new Set(known.length > 0 ? known : SUGGESTED)
+        const cached = readCatalogueCache()
+        for (const entry of cached === undefined ? [] : cached.tools) {
+          if (typeof entry?.name === 'string') names.add(entry.name)
+        }
+        for (const name of Object.keys(state.global)) names.add(name)
+        for (const name of Object.keys(state.session)) names.add(name)
+        const rows = []
+        for (const name of names) {
+          rows.push({
+            name,
+            mode: state.session[name] ?? state.global[name] ?? defaultModeFor(name),
+            builtIn: curatedMode(name) !== undefined,
+          })
+        }
+        return rows.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+      }
+
+      /** 一条改动对应的配置写入：与继承值相同就去掉这一条，配置里只留真正的偏离。 */
+      const opsFor = (plan, view, sessionId) => {
+        const state = stateFrom(view, sessionId, true)
+        if (plan.kind === 'switch') {
+          const path = ['offSessions', sessionId]
+          return [plan.off ? { op: 'set', path, value: true } : { op: 'unset', path }]
+        }
+        if (plan.kind === 'surface') {
+          const field = SURFACE_FIELDS[plan.key]
+          if (field === undefined) return []
+          // 默认就是显示：显示＝去掉这个键，隐藏＝写 false。
+          return [plan.value ? { op: 'unset', path: [field] } : { op: 'set', path: [field], value: false }]
+        }
+        if (plan.kind === 'reset') {
+          return [plan.global ? { op: 'unset', path: ['toolModes'] } : { op: 'unset', path: ['sessionModes', sessionId] }]
+        }
+        if (plan.kind === 'mode') {
+          const inherited = plan.global ? defaultModeFor(plan.name) : (state.global[plan.name] ?? defaultModeFor(plan.name))
+          const path = plan.global ? ['toolModes', plan.name] : ['sessionModes', sessionId, plan.name]
+          return [plan.mode === inherited ? { op: 'unset', path } : { op: 'set', path, value: plan.mode }]
+        }
+        return []
+      }
+
+      /** 一次写入；失败时把人话错误交回去。 */
+      async function writeOps(face, view, ops, t) {
+        try {
+          const response = await face.mutate(view.ns, ops, view.revision)
+          if (response === undefined || response.ok !== true) {
+            return { ok: false, text: format(t('error.failed'), { reason: describeFailure(response === undefined ? undefined : response.error, t) }) }
+          }
+          return { ok: true }
+        } catch (error) {
+          return { ok: false, text: format(t('error.failed'), { reason: describeFailure(error, t) }) }
+        }
+      }
+
+      /**
+       * 执行面板的一次操作：写配置、读回状态与目录。
+       * 外形与旧的命令回执一致（`text` 里仍附带 `[web-tools]`），所以上层的
+       * `parseTools` / `applyPlan` / 目录缓存都不用改。
+       * @param sessionId - the Session the panel is drawn for.
+       * @param rawInput - 面板发出的同一套文本（`on|off|surface …|mode …|tools`）。
        * @param t - the translator.
        * @returns `{ ok, text, state, off }`; `ok` false carries a rendered message.
        */
       async function run(sessionId, rawInput, t) {
         if (sessionId === undefined) return { ok: false, text: t('error.noSession'), state: undefined }
-        const remote = remoteOf()
-        const commands = remote === undefined ? undefined : remote.commands
-        if (commands === undefined || typeof commands.execute !== 'function') {
-          return { ok: false, text: t('error.noRemote'), state: undefined }
+        const face = settingsFace()
+        if (face === undefined) return { ok: false, text: t('error.noRemote'), state: undefined }
+        const plan = planOf(rawInput)
+        const reading = plan === null && /^(tools|status)(\s|$)/i.test(String(rawInput).trim())
+        if (plan === null && !reading) return { ok: false, text: t('error.badInput'), state: undefined }
+        const read = await readFace(t)
+        if (read.ok !== true) return { ok: false, text: read.text, state: undefined }
+        if (read.writable === false) {
+          return { ok: false, text: t('panel.hint.readonly'), state: stateFrom(read.view, sessionId, false) }
         }
-        try {
-          const result = await commands.execute(sessionId, `/webtoggle ${rawInput}`, [])
-          if (result === undefined || result.ok !== true) {
-            const reason = result === undefined ? t('error.failedNoReason') : describeFailure(result.error, t)
-            return { ok: false, text: format(t('error.failed'), { reason }), state: undefined }
+        if (plan !== null) {
+          const ops = opsFor(plan, read.view, sessionId)
+          if (ops.length > 0) {
+            const written = await writeOps(face, read.view, ops, t)
+            if (written.ok !== true) return { ok: false, text: written.text, state: stateFrom(read.view, sessionId, true) }
           }
-          // `undefined` means the Host resolved no command with that name.
-          const execution = result.value
-          if (execution === undefined) return { ok: false, text: t('error.commandMissing'), state: undefined }
-          const outcome = execution.result
-          if (outcome === undefined) return { ok: false, text: t('error.failedNoReason'), state: undefined }
-          const state = parseState(outcome.text)
-          const marker = parseMarker(outcome.text)
-          if (outcome.kind !== 'success') {
-            const text = typeof outcome.text === 'string' && outcome.text !== '' ? outcome.text : t('error.failedNoReason')
-            return { ok: false, text, state }
-          }
-          return {
-            ok: true,
-            text: typeof outcome.text === 'string' ? outcome.text : '',
-            state,
-            off: marker === undefined ? undefined : marker === 'off',
-          }
-        } catch (error) {
-          return { ok: false, text: format(t('error.failed'), { reason: describeFailure(error, t) }), state: undefined }
+        }
+        const fresh = plan === null ? read : await readFace(t)
+        if (fresh.ok !== true) return { ok: false, text: fresh.text, state: undefined }
+        const state = stateFrom(fresh.view, sessionId, true)
+        const tools = catalogueFrom(fresh.view, sessionId)
+        return {
+          ok: true,
+          text: `${t('note.saved')} [web-tools]${JSON.stringify({ tools })}`,
+          state,
+          off: state.off,
         }
       }
 
@@ -936,9 +1104,7 @@ window.__ModuleLoader__.load({
           if (probedSessions.has(sessionId)) return undefined
           let cancelled = false
           const timer = window.setTimeout(async () => {
-            const remote = remoteOf()
-            const commands = remote === undefined ? undefined : remote.commands
-            if (cancelled || commands === undefined || typeof commands.execute !== 'function') return
+            if (cancelled || settingsFace() === undefined) return
             probedSessions.add(sessionId)
             const before = readPreference(sessionId)
             const outcome = await invoke('status', true)
@@ -1275,7 +1441,7 @@ window.__ModuleLoader__.load({
     return {
       // `remote` and `remote.commands` gate activation until the Host Remotes this
       // control calls are mounted.
-      inject: ['slots', 'locale', 'remote', 'remote.commands'],
+      inject: ['slots', 'locale', 'remote', 'remote.commands', 'remote.settings'],
       apply(ctx) {
         ctx.effect(() => {
           if (typeof document === 'undefined') return () => {}

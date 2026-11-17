@@ -105,7 +105,7 @@ const page = (() => {
     if (name === 'react') return React
     throw new Error(`unexpected require: ${name}`)
   })
-  assert.deepEqual(moduleExports.inject, ['slots', 'locale', 'remote', 'remote.commands'])
+  assert.deepEqual(moduleExports.inject, ['slots', 'locale', 'remote', 'remote.commands', 'remote.settings'])
 
   const dictionary = {}
   const state = { slots: {}, remote: undefined, effects: [], sessions: undefined }
@@ -205,8 +205,55 @@ const stubRemote = (calls, text) => ({
 })
 
 /**
- * 一个有状态的假宿主：照着 `/webtoggle` 的文法改状态，然后回带标记与状态 JSON 的文本。
- * 用它才能验证「面板上的操作会落到宿主、并且界面跟着回执更新」这条链路。
+ * 一个走配置线的假宿主：`describe` 报当前状态，`mutate` 记下 ops 并改状态。
+ * 面板上的一切点击都该走这条线，`calls` 里绝不该出现命令。
+ */
+function stubSettings(calls, options = {}) {
+  const state = { off: options.off === true, writable: options.writable !== false, revision: 1 }
+  const sessionId = options.sessionId ?? 's1'
+  const namespaces = () => (options.namespaces !== undefined ? options.namespaces : [{
+    ns: 'web-toggle',
+    value: {
+      pluginPage: true,
+      settingsSection: true,
+      composerPanel: true,
+      toolModes: {},
+      sessionModes: {},
+      offSessions: state.off ? { [sessionId]: true } : {},
+    },
+    user: {},
+    revision: state.revision,
+    writable: state.writable,
+    applies: 'live',
+  }])
+  return {
+    state,
+    remote: {
+      settings: {
+        describe: async () => {
+          if (options.describeError !== undefined) return { ok: false, error: { message: options.describeError } }
+          return { ok: true, value: { writable: state.writable, hasDocument: true, namespaces: namespaces() } }
+        },
+        mutate: async (ns, ops) => {
+          if (options.mutateError !== undefined) return { ok: false, error: { message: options.mutateError } }
+          calls.push(ops)
+          for (const op of ops) if (op.path[0] === 'offSessions') state.off = op.op === 'set' && op.value === true
+          state.revision += 1
+          return { ok: true, value: {} }
+        },
+      },
+      commands: {
+        execute: async () => {
+          throw new Error('按钮不该走命令线')
+        },
+      },
+    },
+  }
+}
+
+/**
+ * 一个有状态的假宿主：**走配置线**（`remote.settings.describe/mutate`），和插件现在的做法一致。
+ * `state.ops` 记录每次写进去的 ops，`state.calls` 只会因为命令线被用到而变长——按钮绝不该碰它。
  */
 function fakeHost(initial = {}) {
   const state = {
@@ -218,42 +265,56 @@ function fakeHost(initial = {}) {
     writable: true,
     ...initial,
   }
-  state.calls = []
-  // The catalogue the panel draws, and this plugin's shipped modes.
+  state.ops = []
+  state.commands = []
+  state.describes = 0
+  state.revision = 1
+  // 面板画出来的目录，以及插件自带的默认模式。
   const CATALOGUE = ['bash', 'grep', 'ops_bash', 'read', 'web_fetch', 'web_search', 'write']
   const DEFAULT_MODES = { ops_bash: 'inspect', web_fetch: 'hide', web_search: 'hide' }
-  const modeIn = (name) => state.session[name] ?? state.global[name] ?? DEFAULT_MODES[name] ?? 'keep'
+  const modeIn = (name) => state.session[name] ?? state.global[name] ?? DEFAULT_MODES[name] ?? 'inspect'
   const catalogue = () => ({
-    tools: [...CATALOGUE]
-      .sort()
-      .map((name) => ({ name, mode: modeIn(name), builtIn: DEFAULT_MODES[name] !== undefined })),
+    tools: [...CATALOGUE].sort().map((name) => ({ name, mode: modeIn(name), builtIn: DEFAULT_MODES[name] !== undefined })),
   })
-  const apply = (line) => {
-    const words = line.replace(/^\/webtoggle\s*/, '').trim().split(/\s+/)
-    const [head, ...rest] = words
-    const global = rest.includes('--global')
-    const table = global ? state.global : state.session
-    if (head === 'off') state.off = true
-    else if (head === 'on') state.off = false
-    else if (head === 'surface') {
-      if (rest[0] !== 'plugin') state.surfaces[rest[0]] = rest[1] === 'on'
-    } else if (head === 'mode') {
-      if (rest[0] === 'reset' || rest[0] === 'clear') for (const key of Object.keys(table)) delete table[key]
-      else if (rest[0] !== undefined && rest[1] !== undefined) table[rest[0]] = rest[1]
-    } else if (head === 'keep') {
-      if (rest[0] === 'reset') for (const key of Object.keys(table)) delete table[key]
-      else if (rest[0] !== undefined) table[rest[0]] = rest[1] === 'on' ? 'keep' : 'hide'
-    } else if (head === 'allow') {
-      const verb = rest[0]
-      const name = rest.find((word) => word !== '--global' && word !== verb)
-      if (verb === 'add' && name !== undefined) table[name] = 'keep'
-      else if (verb === 'remove' && name !== undefined) table[name] = 'hide'
-      else if (verb === 'clear') for (const key of Object.keys(table)) delete table[key]
+  const value = () => {
+    const offSessions = {}
+    if (state.off) offSessions.s1 = true
+    return {
+      pluginPage: true,
+      settingsSection: state.surfaces.settings,
+      composerPanel: state.surfaces.composer,
+      debug: false,
+      toolModes: { ...state.global },
+      sessionModes: Object.keys(state.session).length === 0 ? {} : { s1: { ...state.session } },
+      knownTools: [...CATALOGUE].sort(),
+      offSessions,
     }
+  }
+  const applyOps = (ops) => {
+    state.ops.push(ops)
+    for (const op of ops) {
+      const path = op.path.join('/')
+      if (path === 'composerPanel') state.surfaces.composer = op.value === true
+      else if (path === 'settingsSection') state.surfaces.settings = op.value === true
+      else if (path.startsWith('offSessions/')) state.off = op.value === true
+      else if (path.startsWith('toolModes/')) {
+        const name = op.path[1]
+        if (op.op === 'set') state.global[name] = op.value
+        else delete state.global[name]
+      } else if (path.startsWith('sessionModes/')) {
+        if (op.op === 'unset' && op.path.length === 2) for (const key of Object.keys(state.session)) delete state.session[key]
+        else if (op.path.length === 3) {
+          const name = op.path[2]
+          if (op.op === 'set') state.session[name] = op.value
+          else delete state.session[name]
+        }
+      }
+    }
+    state.revision += 1
   }
   const view = () => ({
     off: state.off,
-    surfaces: { ...state.surfaces },
+    surfaces: { ...state.surfaces, plugin: true },
     global: { ...state.global },
     session: { ...state.session },
     writable: state.writable,
@@ -261,15 +322,30 @@ function fakeHost(initial = {}) {
   return {
     state,
     view,
+    catalogue,
     remote: {
+      settings: {
+        describe: async () => {
+          state.describes += 1
+          return {
+            ok: true,
+            value: {
+              writable: state.writable,
+              hasDocument: true,
+              namespaces: [{ ns: 'web-toggle', value: value(), user: {}, revision: state.revision, writable: state.writable, applies: 'live' }],
+            },
+          }
+        },
+        mutate: async (ns, ops) => {
+          if (ns !== 'web-toggle') return { ok: false, error: { message: 'unknown namespace' } }
+          applyOps(ops)
+          return { ok: true, value: {} }
+        },
+      },
       commands: {
         execute: async (sessionId, line) => {
-          state.calls.push([sessionId, line])
-          apply(line)
-          const marker = `[web:${state.off ? 'off' : 'on'}]`
-          const withCatalogue = ['tools', 'mode', 'keep', 'allow', 'surface'].includes(line.replace(/^\/webtoggle\s*/, '').split(/\s+/)[0])
-          const catalogueMarker = withCatalogue ? ` [web-tools]${JSON.stringify(catalogue())}` : ''
-          return { ok: true, value: { result: { kind: 'success', text: `ok${catalogueMarker} ${marker} [web-state]${JSON.stringify(view())}` } } }
+          state.commands.push([sessionId, line])
+          return { ok: true, value: { result: { kind: 'success', text: 'ok' } } }
         },
       },
     },
@@ -295,11 +371,29 @@ function textOf(node) {
 function buttonWith(node, text) {
   return queryAll(node, 'dswt-btn').find((button) => textOf(button).trim() === text)
 }
-/** 最近一次发给宿主的那条命令（面板操作后会紧跟一次 tools 取目录）。 */
+/** 最近一次写进配置的 ops（读目录不算写，所以不会出现在这里）。 */
+const lastOps = (host) => host.state.ops.at(-1) ?? []
+/** 最近一次 ops 里有没有动过这个字段。 */
+const touched = (host, field) => JSON.stringify(lastOps(host)).includes(`"${field}"`)
+/**
+ * 兼容旧断言的助手：`/webtoggle mode web_search hide` 这种写法翻译成
+ * 「最近一次 ops 里有没有出现这几个词」。按钮一律走配置线，命令线只留给读目录。
+ */
 const lastCommand = (host, expected) => {
-  const lines = host.state.calls.map(([, line]) => line)
-  return expected === undefined ? lines.at(-1) : lines.includes(expected)
+  if (expected === undefined) return JSON.stringify(lastOps(host))
+  const text = JSON.stringify(lastOps(host))
+  const words = expected.replace(/^\/webtoggle\s+/, '').split(/\s+/).filter(Boolean)
+  const [head, ...rest] = words
+  if (head === 'tools') return lastOps(host).length === 0
+  if (head === 'off' || head === 'on') return text.includes('"offSessions"')
+  if (head === 'surface') return text.includes(`"${SURFACE_FIELD_OF[rest[0]] ?? rest[0]}"`)
+  if (head === 'mode') {
+    // 与继承值相同的模式写回时是 unset（配置里只留真正的偏离）。
+    return lastOps(host).some((op) => op.path.includes(rest[0]) && (op.op === 'unset' || op.value === rest[1]))
+  }
+  return rest.every((word) => text.includes(`"${word}"`))
 }
+const SURFACE_FIELD_OF = { plugin: 'pluginPage', settings: 'settingsSection', composer: 'composerPanel' }
 
 /** 面板里名字为 name 的那一行工具。 */
 const toolRow = (tree, name) => queryAll(tree, 'dswt-tool').find((row) => queryAll(row, 'dswt-tool-name')[0]?.children?.[0] === name)
@@ -365,18 +459,18 @@ function expand(node) {
   console.log('2 三个槽位与样式注册 ok')
 }
 
-// ---- 3. 点一次：发 off，灭态 + 提示，并记住 ------------------------------
+// ---- 3. 点一次：写进配置，灭态 + 提示，并记住 ---------------------------
 {
   storages.clear()
   const { state, render, dictionary } = mount('s3')
   const calls = []
-  state.remote = stubRemote(calls, '联网工具已关闭 [web:off]')
+  const host = stubSettings(calls, { sessionId: 's3' })
+  state.remote = host.remote
   let tree = render()
   queryAll(tree, 'dswt-trigger')[0].props.onClick()
   await settle()
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].length, 3, 'execute 应带三个 wire 参数')
-  assert.deepEqual(calls[0].slice(0, 2), ['s3', '/webtoggle off'])
+  assert.deepEqual(calls, [[{ op: 'set', path: ['offSessions', 's3'], value: true }]], '按钮应只写配置')
+  assert.equal(host.state.commands, undefined, '按钮不该碰命令线')
   tree = render()
   assert.equal(tree.props['data-off'], 'true')
   assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:s3'), '1', '应记住 off')
@@ -385,55 +479,54 @@ function expand(node) {
   console.log('3 关闭流程 ok')
 }
 
-// ---- 4. 记住 off 后重新挂载：显示灭态、探针只发一次、宿主确认时不出提示 --
+// ---- 4. 记住 off 后重新挂载：显示灭态、探针只读一次、宿主确认时不出提示 --
 {
   storages.clear()
   globalThis.localStorage.setItem('dsh-web-toggle:off:s4', '1')
   const calls = []
   const first = mount('s4')
-  first.state.remote = stubRemote(calls, '本来就是关闭的 [web:off]')
+  const host = stubSettings(calls, { off: true, sessionId: 's4' })
+  first.state.remote = host.remote
   let tree = first.render()
   assert.equal(tree.props['data-off'], 'true', '应读回记住的状态')
   flushTimers()
   await settle()
-  assert.equal(calls.length, 1, '挂载应只探一次')
-  assert.equal(calls[0][1], '/webtoggle status')
+  assert.equal(calls.length, 0, '探针只读配置，不写')
   tree = first.render()
   assert.equal(tree.props['data-off'], 'true')
   assert.equal(noteOf(tree), undefined, '宿主确认仍是关闭时不应弹提示（切来切去不再重复出现）')
 
   // 再点一次 → on
-  const onCalls = []
-  first.state.remote = stubRemote(onCalls, '联网工具已恢复 [web:on]')
   queryAll(tree, 'dswt-trigger')[0].props.onClick()
   await settle()
-  assert.equal(onCalls[0][1], '/webtoggle on')
+  assert.deepEqual(calls.at(-1), [{ op: 'unset', path: ['offSessions', 's4'] }])
   tree = first.render()
   assert.equal(tree.props['data-off'], 'false')
   assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:s4'), null)
   console.log('4 重新挂载与恢复 ok')
 }
 
-// ---- 5. 切走再切回：不重发 status、不再弹提示 ---------------------------
+// ---- 5. 切走再切回：不重复读配置、不再弹提示 ---------------------------
 {
   storages.clear()
   globalThis.localStorage.setItem('dsh-web-toggle:off:s5', '1')
-  const firstCalls = []
   const first = mount('s5')
-  first.state.remote = stubRemote(firstCalls, '本来就是关闭的 [web:off]')
+  const host = stubSettings([], { off: true, sessionId: 's5' })
+  first.state.remote = host.remote
   first.render()
   flushTimers()
   await settle()
-  assert.equal(firstCalls.length, 1)
+  assert.equal(host.state.revision, 1, '探针不该写配置')
 
   // 模拟切到别的会话再切回来：组件重新挂载，模块级缓存还在
-  const secondCalls = []
+  let describes = 0
+  const watched = { ...host.remote, settings: { ...host.remote.settings, describe: async () => (describes++, host.remote.settings.describe()) } }
   const second = mount('s5')
-  second.state.remote = stubRemote(secondCalls, '本来就是关闭的 [web:off]')
+  second.state.remote = watched
   const tree = second.render()
   flushTimers()
   await settle()
-  assert.equal(secondCalls.length, 0, '同一页面内不应重复探测')
+  assert.equal(describes, 0, '同一页面内不应重复探测')
   assert.equal(tree.props['data-off'], 'true')
   assert.equal(noteOf(tree), undefined, '不应再次弹提示')
   console.log('5 切走切回不重复提示 ok')
@@ -453,7 +546,7 @@ function expand(node) {
   console.log('6 运行中禁用 ok')
 }
 
-// ---- 7. 失败分支 ---------------------------------------------------------
+// ---- 7. 失败分支 --------------------------------------------------------
 {
   storages.clear()
   const { state, render, t } = mount('s7')
@@ -467,33 +560,29 @@ function expand(node) {
   assert.equal(noteOf(tree).props['data-kind'], 'error')
   assert.equal(textOf(noteOf(tree)), t('error.noRemote'))
 
-  // 7.2 命令未注册（value undefined）
-  state.remote = { commands: { execute: async () => ({ ok: true, value: undefined }) } }
+  // 7.2 配置里没有本插件那一行
+  state.remote = stubSettings([], { namespaces: [] }).remote
   tree = render()
   queryAll(tree, 'dswt-trigger')[0].props.onClick()
   await settle()
   tree = render()
-  assert.equal(textOf(noteOf(tree)), t('error.commandMissing'))
+  assert.equal(textOf(noteOf(tree)), t('error.noConfig'))
 
-  // 7.3 Remote 失败
-  state.remote = { commands: { execute: async () => ({ ok: false, error: { message: 'socket closed' } }) } }
+  // 7.3 读配置就失败
+  state.remote = stubSettings([], { describeError: 'socket closed' }).remote
   tree = render()
   queryAll(tree, 'dswt-trigger')[0].props.onClick()
   await settle()
   tree = render()
   assert.match(textOf(noteOf(tree)), /socket closed/)
 
-  // 7.4 Host 明确拒绝：原文展示，状态不变
-  state.remote = {
-    commands: {
-      execute: async () => ({ ok: true, value: { result: { kind: 'error', text: '当前任务正在执行，等这一轮结束后再切换联网开关' } } }),
-    },
-  }
+  // 7.4 宿主拒绝写入：原文展示，状态不变
+  state.remote = stubSettings([], { mutateError: '当前任务正在执行，等这一轮结束后再切换联网开关' }).remote
   tree = render()
   queryAll(tree, 'dswt-trigger')[0].props.onClick()
   await settle()
   tree = render()
-  assert.equal(textOf(noteOf(tree)), '当前任务正在执行，等这一轮结束后再切换联网开关')
+  assert.match(textOf(noteOf(tree)), /当前任务正在执行，等这一轮结束后再切换联网开关/)
   assert.equal(tree.props['data-off'], 'false', '被拒绝时状态不变')
   console.log('7 失败分支 ok')
 }
@@ -503,13 +592,11 @@ function expand(node) {
   storages.clear()
   globalThis.localStorage.setItem('dsh-web-toggle:off:s8', '1')
   const { state, render, t } = mount('s8')
-  const calls = []
-  state.remote = stubRemote(calls, '本来就是开启的 [web:on]')
+  // 宿主那边是开的：配置里没有这个会话的 off 记录。
+  state.remote = stubSettings([], { off: false, sessionId: 's8' }).remote
   let tree = render()
   flushTimers()
   await settle()
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0][1], '/webtoggle status')
   assert.equal(globalThis.localStorage.getItem('dsh-web-toggle:off:s8'), null, '应把记忆纠正成 on')
   tree = render()
   assert.equal(tree.props['data-off'], 'false')
@@ -530,8 +617,8 @@ function expand(node) {
   assert.equal(caret.props['aria-expanded'], 'false')
   caret.props.onClick()
   await settle()
-  assert.ok(lastCommand(host, '/webtoggle tools --json'), '打开时只取一次工具目录')
-  assert.ok(!host.state.calls.some((call) => call[1] === '/webtoggle status'), '打开面板不再多问一次状态')
+  assert.equal(host.state.describes >= 1, true, '打开时要读一次配置/目录')
+  assert.equal(host.state.commands.length, 0, '打开面板不该发命令：缓存命中就只画缓存')
   tree = render()
   tree = render()
   tree = render()
@@ -564,7 +651,7 @@ function expand(node) {
   // 再点：检查 -> 调用时拒绝
   queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props.onClick()
   await settle()
-  assert.ok(lastCommand(host, '/webtoggle mode web_search refuse'))
+  assert.ok(lastCommand(host, '/webtoggle mode web_search refuse'), 'ops=' + JSON.stringify(host.state.ops.at(-1)))
   assert.equal(host.state.session.web_search, 'refuse')
   tree = render()
   tree = render()
@@ -587,12 +674,12 @@ function expand(node) {
   assert.ok(lastCommand(host, '/webtoggle mode web_search hide'))
 
   // 筛选框只影响列表，不发命令
-  const before = host.state.calls.length
+  const before = host.state.ops.length
   const filter = queryAll(tree, 'dswt-input').find((input) => input.props.placeholder === t('panel.filter'))
   filter.props.onChange({ target: { value: 'web' } })
   tree = render()
   assert.equal(queryAll(tree, 'dswt-tool').length, 2, '只剩两个 web_* 工具')
-  assert.equal(host.state.calls.length, before, '筛选不该惊动宿主')
+  assert.equal(host.state.ops.length, before, '筛选不该惊动宿主')
   filter.props.onChange({ target: { value: 'zzz' } })
   tree = render()
   assert.equal(queryAll(tree, 'dswt-tool').length, 0)
@@ -629,7 +716,7 @@ function expand(node) {
   tree = render()
   tree = render()
   assert.ok(lastCommand(host, '/webtoggle tools --json'), '页面挂载时只取一次目录')
-  assert.ok(!host.state.calls.some((call) => call[1] === '/webtoggle status'), '页面挂载不再多问一次状态')
+  assert.equal(host.state.commands.length, 0, '页面挂载不该发命令')
   const panels = queryAll(tree, 'dswt-panel')
   assert.equal(panels.length, 1)
   assert.equal(panels[0].props['data-inline'], 'true', '页面里的面板应是内联的')
@@ -669,12 +756,12 @@ function expand(node) {
 
   // 全局长名单：点一下 bash 就写进 globalTools（命令带 --global）
   const bashRow = toolRow(pageTree, 'bash')
-  assert.ok(bashRow !== undefined, '目录里应有 bash')
-  assert.equal(queryAll(bashRow, 'dswt-btn')[0].props['data-mode'], 'keep', 'bash 默认放行')
+  assert.ok(bashRow !== undefined, '目录里应有 bash: ' + JSON.stringify(queryAll(pageTree, 'dswt-tool').map((r) => textOf(r))) + ' cache=' + String(globalThis.localStorage.getItem('dsh-web-toggle:catalogue')).slice(0, 120))
+  assert.equal(queryAll(bashRow, 'dswt-btn')[0].props['data-mode'], 'inspect', '没配置过的工具默认检查')
   queryAll(bashRow, 'dswt-btn')[0].props.onClick()
   await settle()
-  assert.ok(lastCommand(reopened, '/webtoggle mode bash hide --global'), '全局面板要带 --global')
-  assert.equal(reopened.state.global.bash, 'hide')
+  assert.ok(lastCommand(reopened, '/webtoggle mode bash refuse --global'), '全局面板要带 --global')
+  assert.equal(reopened.state.global.bash, 'refuse')
   console.log('11 设置页面板 ok')
 }
 
@@ -699,7 +786,8 @@ function expand(node) {
   page.state.remote = fakeHost().remote
   // 把模块级「最后会话」清掉：先把它写成空再看页面
   globalThis.localStorage.removeItem('dsh-web-toggle:last-session')
-  const { render, t } = mountPage('settings.section')
+  // 用插件详情页：它是常驻入口，不受「设置页被关掉」影响。
+  const { render, t } = mountPage('plugins.detail.section', { subject: { kind: 'bundle', pkg: { name: 'dsh-web-toggle' } } })
   let tree = render()
   await settle()
   tree = render()
@@ -708,7 +796,7 @@ function expand(node) {
   page.state.remote = undefined
   // 目录缓存会让页面直接画出来、根本不去连宿主；要测失败提示得先清掉它。
   globalThis.localStorage.removeItem('dsh-web-toggle:catalogue')
-  const broken = mountPage('settings.section')
+  const broken = mountPage('plugins.detail.section', { subject: { kind: 'bundle', pkg: { name: 'dsh-web-toggle' } } })
   tree = broken.render()
   await settle()
   tree = broken.render()

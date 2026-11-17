@@ -125,3 +125,14 @@
 本插件使用 AI 辅助完成（设计、实现、测试与文档均由人和 AI 协作产出，并经真机红队测试）。
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
+## 0.5.2：配置即状态，面板点击不写日志
+
+命令的生命周期是内核的：每一次 `/webtoggle …` 都会在聊天里留下 `command/run` + `command/done`，而且没有"静默"字段（`normalizeResult` 只接受 `{kind, text}`，聊天只硬编码隐藏 `permission` 与 `team on|off`）。所以面板里的按钮**一律不走命令**：
+
+- 面板写 `settings` 服务里本插件那一行配置（`ctx.remote.settings.describe/mutate`，`ns` 就是 profile 里这一行的 id `web-toggle`）。
+- 宿主在 `agent/pre-step` 开头调 `reconcile(agent)`：配置说这个会话关着、而运行时还开着，就当场装 `restrict()` + `guard()`；反过来就撤掉。变化照旧塞 `pendingSeries`，pre-step 把它翻成 `startsRequestSeries`。
+- 面板要画的**完整工具列表**由宿主每轮写进配置字段 `knownTools`（目录变了才写），客户端读配置画，因此浏览工具也不需要命令、不会产生回执。缓存（localStorage）只作为首屏兜底。
+- 唯一会留在聊天里的是：输入框手敲的命令，和面板里的**刷新**按钮（它真的跑一次 `tools --json`）。
+
+这条边界值得记住：**能读配置的地方绝不发命令**。按钮 → 配置 → pre-step → `restrict`/`guard`，是一条不产生用户可见日志的链路。

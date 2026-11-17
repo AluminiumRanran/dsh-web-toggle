@@ -51,6 +51,8 @@ export const Config = z.object({
   debug: z.boolean().default(false).volatile().description('Write the machine-readable state into every command receipt. Off by default: a successful command prints one short line, and errors always print in full.'),
   toolModes: z.dict(z.string()).default({}).volatile().description('Per-tool mode (keep|hide|inspect|refuse) for every Session; a tool named nowhere stays available.'),
   sessionModes: z.dict(z.dict(z.string())).default({}).volatile().description('Per-tool mode overrides for one Session, keyed by Session id.'),
+  offSessions: z.dict(z.boolean()).default({}).volatile().description('Sessions whose switch is off, keyed by Session id. The browser half writes this instead of running a command, so flipping the switch in a panel leaves no receipt in the chat.'),
+  knownTools: z.array(z.string()).default([]).volatile().description('Tool names seen last turn. The panel draws its list from here, so browsing tools never writes a chat receipt.'),
 })
 
 /** Settings field of each browser surface, keyed by the name the command accepts. */
@@ -398,6 +400,13 @@ export function apply(ctx, config) {
     return typeof ref.get === 'function' ? ref.get() : ref
   }
 
+  /** 读一层字符串数组配置（工具名清单），丢掉空值与非字符串。 */
+  function confTools(name) {
+    const raw = conf(name, [])
+    if (!Array.isArray(raw)) return []
+    return raw.filter((item) => typeof item === 'string' && item !== '')
+  }
+
   /** One layer of the "tool name -> mode" table, with anything unexpected dropped. */
   function modesAt(raw) {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
@@ -468,7 +477,7 @@ export function apply(ctx, config) {
    * that lift the restriction and the guard, so the row and the Agent lifetime stay
    * in step.
    */
-  const offSessions = new Map()
+  const appliedOff = new Map()
 
   /** 参数最多读这么多字符：再多也只扫前一段，避免大载荷拖慢每次调用。 */
   const MAX_ARGUMENT_CHARS = 32 * 1024
@@ -543,6 +552,18 @@ export function apply(ctx, config) {
   // Waterfall listener: take the downstream decision first, so every other listener
   // keeps its say, and only wrap the result for a session whose catalog changed.
   ctx.on('agent/pre-step', async (payload, next) => {
+    // 配置是事实来源：面板里点的按钮只写配置，这里在请求发出前把它落到 restrict/guard 上。
+    const target = payload?.agent
+    if (target !== undefined && target.session !== undefined) {
+      try {
+        reconcile(target)
+        // 工具目录也顺手记进配置：面板读配置画列表，浏览时不产生命令回执。
+        refreshKnownTools(target)
+      } catch (error) {
+        // 装不上也要让这一轮照常跑：下一轮 pre-step 会再试一次。
+        ctx.logger?.warn?.(`[web-toggle] reconcile failed: ${messageOf(error)}`)
+      }
+    }
     const decision = await next()
     const agent = payload?.agent
     if (agent === undefined || agent.session === undefined) return decision
@@ -564,9 +585,9 @@ export function apply(ctx, config) {
     const id = agent?.session?.id
     if (id === undefined) return
     pendingSeries.delete(id)
-    const row = offSessions.get(id)
+    const row = appliedOff.get(id)
     if (row === undefined) return
-    offSessions.delete(id)
+    appliedOff.delete(id)
     safely(() => row.dispose())
     safely(() => row.disposeGuard?.())
   })
@@ -579,6 +600,19 @@ export function apply(ctx, config) {
   }
 
   /**
+   * 配置里记的「这个 Session 要不要断网」。浏览器半侧点按钮时只写这里（命令会在聊天里
+   * 留回执），所以配置是唯一的事实来源，运行时状态由它推出来。
+   * @param sessionId - the Session id.
+   * @returns true when the Session is meant to be off.
+   */
+  function desiredOff(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return false
+    const map = conf('offSessions', {})
+    if (map === null || typeof map !== 'object' || Array.isArray(map)) return false
+    return map[sessionId] === true
+  }
+
+  /**
    * Whether the web tools are denied for the Agent in front of us. A row left behind
    * by an earlier Agent of the same Session does not count: the restriction lives on
    * that Agent's scope, so a re-created Agent starts with the tools visible.
@@ -586,8 +620,42 @@ export function apply(ctx, config) {
    * @returns true when this exact Agent is restricted.
    */
   function isOff(agent) {
-    const row = offSessions.get(agent.session.id)
+    const row = appliedOff.get(agent.session.id)
     return row !== undefined && row.agent === agent
+  }
+
+  /**
+   * 把这一层能看到的工具名记进配置：面板读配置画列表，因此浏览工具不必发命令。
+   * @param agent - the Agent about to run a step.
+   */
+  function refreshKnownTools(agent) {
+    try {
+      const names = scopedNames(agent)
+      if (names.length === 0) return
+      const known = confTools('knownTools')
+      if (known.length === names.length && known.every((name, index) => name === names[index])) return
+      void saveConfig((current) => ({ ...current, knownTools: names })).catch(() => {})
+    } catch (error) {
+      // 记不下就算了：面板退回缓存与建议名单，开关本身不受影响。
+    }
+  }
+
+  /**
+   * 把配置里记的开关落到这个 Agent 上：配置说要断网就装限制，说不要就撤掉。
+   * 只在状态真的不一致时动手，所以每轮调一次也很便宜。
+   * @param agent - the Agent about to run a step.
+   * @returns true when the runtime state was changed.
+   */
+  function reconcile(agent) {
+    const sessionId = agent?.session?.id
+    if (sessionId === undefined) return false
+    const desired = desiredOff(sessionId)
+    if (desired === isOff(agent)) return false
+    // switchOff/switchOn 自己会往 pendingSeries 里塞标记，pre-step 随后把它翻成
+    // startsRequestSeries，于是这一轮的请求会用新的工具表重建。
+    if (desired) switchOff(agent)
+    else switchOn(agent)
+    return true
   }
 
   /**
@@ -797,7 +865,7 @@ export function apply(ctx, config) {
       pendingSeries.delete(sessionId)
       return result(agent, 'error', `没能装上命令检查 / Could not install the command check: ${messageOf(error)}`)
     }
-    offSessions.set(sessionId, { agent, dispose: opened.dispose, disposeGuard })
+    appliedOff.set(sessionId, { agent, dispose: opened.dispose, disposeGuard })
     return report(agent, true)
   }
 
@@ -812,8 +880,8 @@ export function apply(ctx, config) {
   function switchOn(agent) {
     const sessionId = agent.session.id
     pendingSeries.add(sessionId)
-    const row = offSessions.get(sessionId)
-    offSessions.delete(sessionId)
+    const row = appliedOff.get(sessionId)
+    appliedOff.delete(sessionId)
     if (row !== undefined) {
       safely(() => row.dispose?.())
       safely(() => row.disposeGuard?.())
@@ -831,7 +899,7 @@ export function apply(ctx, config) {
   function retune() {
     let applied = 0
     let skipped = 0
-    for (const [sessionId, row] of [...offSessions]) {
+    for (const [sessionId, row] of [...appliedOff]) {
       if (turnIsOpen(row.agent)) {
         skipped += 1
         continue
@@ -851,12 +919,29 @@ export function apply(ctx, config) {
         }
       }
       pendingSeries.add(sessionId)
-      offSessions.set(sessionId, { agent: row.agent, dispose: opened.dispose, disposeGuard })
+      appliedOff.set(sessionId, { agent: row.agent, dispose: opened.dispose, disposeGuard })
       safely(() => row.dispose?.())
       safely(() => row.disposeGuard?.())
       applied += 1
     }
     return { applied, skipped }
+  }
+
+  /**
+   * 把开关写回配置：命令、面板、重启之后看到的是同一份状态。
+   * 运行时已经切好了，配置写不进去时不再往回执里塞第二句抱怨（debug 时会带原因）。
+   * @param agent - the Agent whose Session switch changed.
+   * @param off - the new value.
+   */
+  async function persistOff(agent, off) {
+    const sessionId = agent.session.id
+    await saveConfig((current) => {
+      const raw = current.offSessions
+      const map = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw } : {}
+      if (off) map[sessionId] = true
+      else delete map[sessionId]
+      return { ...current, offSessions: map }
+    })
   }
 
   /** Parse `on|true|1|show|yes` as true and `off|false|0|hide|no` as false. */
@@ -1091,7 +1176,11 @@ export function apply(ctx, config) {
     if (agent?.session?.id === undefined) {
       return { kind: 'error', text: '没有可切换的会话 / No Session to switch.' }
     }
-    if (requested === 'status') return report(agent, false)
+    // 读命令先把配置落到运行时（面板里点的按钮只写配置），否则回执会说旧状态。
+    if (requested === 'status') {
+      if (!turnIsOpen(agent)) reconcile(agent)
+      return report(agent, false)
+    }
     if (requested !== '' && requested !== 'on' && requested !== 'off') {
       return {
         kind: 'error',
@@ -1113,7 +1202,11 @@ export function apply(ctx, config) {
         '当前任务正在执行，等这一轮结束后再切换联网开关 / This task is running; switch the web tools after the turn ends.',
       )
     }
-    return next ? switchOff(agent) : switchOn(agent)
+    const outcome = next ? switchOff(agent) : switchOn(agent)
+    // 运行时切成功才回写配置；失败时保持配置不变，下次再试。写入是异步的，命令不等它：
+    // 面板在下一帧读到配置，运行时状态此刻已经切好了。
+    if (outcome.kind === 'success') persistOff(agent, next).catch(() => {})
+    return outcome
   }
 
   ctx.commands.register({

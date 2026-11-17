@@ -87,3 +87,10 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 本插件使用 AI 辅助完成（设计、实现、测试与文档均由人和 AI 协作产出，并经真机红队测试）。
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
+## 0.5.2 追加
+
+- [x] `node tests/host.test.mjs`：17 组通过（新增第 17 组：配置说关 → pre-step 自动装限制并重建请求序列；配置改回开 → 自动撤销；目录写进 `knownTools`）。
+- [x] `node tests/client.test.mjs`：14 组通过（按钮全部改走 `settings.describe/mutate`，断言"命令线一次都没被调用"）。
+- [ ] 真机：刷新客户端后点开关 / 切模式，聊天里**不应**出现新的 `> webtoggle` 回执；点「刷新」应出现一条。
+- [ ] 真机：宿主重启后，配置里关着的会话在第一轮请求前就被断网（不需要先点一次开关）。
