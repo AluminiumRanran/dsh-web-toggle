@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Network switch",
-    "description": "A per-session network switch: every tool has one of three modes — keep, hide or inspect. When off, internet-facing tools disappear, general-purpose executors (the shell) are content-checked per call, and everything unlisted stays available. Three configuration surfaces (composer caret, settings section, bundle detail page) with modes layered per session, globally, and by factory default.",
+    "description": "A per-session network switch: every tool has one of four modes — keep, hide (drop from the list), inspect each call, or refuse each call; tools you never configured are inspected. Three panels: composer caret, settings sidebar, bundle detail page.",
     "detail": "docs/DETAIL.md"
   }
 }

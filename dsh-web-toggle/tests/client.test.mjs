@@ -561,7 +561,17 @@ function expand(node) {
   tree = render()
   assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-mode'], 'inspect', '回执后按钮要跟着变')
 
-  // 再点一下：内容检查 -> 保留
+  // 再点：检查 -> 调用时拒绝
+  queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props.onClick()
+  await settle()
+  assert.ok(lastCommand(host, '/webtoggle mode web_search refuse'))
+  assert.equal(host.state.session.web_search, 'refuse')
+  tree = render()
+  tree = render()
+  assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-mode'], 'refuse', '第四态要有自己的 data-mode')
+  assert.equal(textOf(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0]), t('panel.mode.refuse'), '按钮要写出当前模式')
+
+  // 再点：调用时拒绝 -> 放行
   queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props.onClick()
   await settle()
   assert.ok(lastCommand(host, '/webtoggle mode web_search keep'))
@@ -571,7 +581,7 @@ function expand(node) {
   assert.equal(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props['data-mode'], 'keep')
   assert.equal(textOf(queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0]), t('panel.mode.keep'), '按钮要写出当前模式')
 
-  // 第三次：回到隐藏，循环闭合
+  // 第四次：回到拒绝（隐藏），循环闭合
   queryAll(toolRow(tree, 'web_search'), 'dswt-btn')[0].props.onClick()
   await settle()
   assert.ok(lastCommand(host, '/webtoggle mode web_search hide'))

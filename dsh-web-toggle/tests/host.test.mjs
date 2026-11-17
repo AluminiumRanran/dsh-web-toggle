@@ -279,9 +279,18 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
     assert.equal(deny.has(name), true, `默认应隐藏 ${name}`)
   }
   for (const name of ['ops_bash', 'ops_inspect_local_file', 'ops_glob', 'ops_grep', 'write', 'edit', 'todo_write', 'present', 'remember', 'schedule_list', 'read']) {
-    assert.equal(deny.has(name), false, `默认应放行 ${name}`)
+    assert.equal(deny.has(name), false, `默认不该隐藏 ${name}`)
   }
   assert.equal(deny.has('acp_cache'), false, '目录里没有的名字不会被塞进 deny')
+
+  // 名单之外的默认是「检查」：留在工具表里，但每次调用看参数
+  const shown = await call(agent, 'tools')
+  const listed = JSON.parse(shown.text.slice(shown.text.indexOf('[web-tools]') + 11).split(' [web:')[0]).tools
+  const row = (name) => listed.find((tool) => tool.name === name)
+  assert.equal(row('write').mode, 'inspect', '没配置过的工具默认检查')
+  assert.equal(row('working_directory').mode, 'inspect', '未分类的工具同样默认检查')
+  assert.equal(row('web_search').mode, 'hide', '明确分类的仍然是隐藏')
+  assert.equal(row('ops_bash').mode, 'inspect', 'shell 是检查')
   console.log('11 默认三态分类 ok')
 }
 
@@ -549,10 +558,22 @@ function makeConfigCtx(initial = {}) {
   assert.ok(restrictions[1].deny.includes('read'), '新名单要包含刚隐藏的工具')
   assert.ok(disposals.includes('lifted'), '旧限制要撤销，避免层层叠加')
 
-  // 把 shell 从「内容检查」改成「保留」：这一轮不该再装 guard
+  // 把 shell 改成「保留」：其它工具仍是检查，所以 guard 还要重装一份
   const before = guards.length
   await call2(agent, 'mode ops_bash keep')
-  assert.equal(guards.length, before, '不再检查 shell 时不该装新 guard')
+  assert.ok(guards.length > before, '还有别的工具要检查，guard 要跟着重装')
+  assert.equal(typeof guards.at(-1)({ agent, name: 'ops_bash', arguments: { command: 'curl https://a.b' } }), 'undefined', 'shell 改成保留后不再拦命令')
+
+  // 「调用时拒绝」：连参数都不看，一律拒
+  await call2(agent, 'mode ops_bash refuse')
+  assert.equal(typeof guards.at(-1)({ agent, name: 'ops_bash', arguments: { command: 'echo hi' } }), 'string', '调用时拒绝不看参数，直接拒')
+
+  // 参数扫描：非 shell 工具的参数里有 URL 也要拦
+  const readGuard = guards.at(-1)
+  assert.equal(typeof readGuard({ agent, name: 'read_image', arguments: { file_path: 'https://example.com/a.png' } }), 'string', '检查模式要扫参数')
+  assert.equal(readGuard({ agent, name: 'read_image', arguments: { file_path: 'D:/a.png' } }), undefined, '本地路径照常放行')
+
+  await call2(agent, 'mode ops_bash inspect')
   const afterShell = restrictions.length
 
   // 正在执行时不能改动这一轮的工具表：只存配置，跳过下发
@@ -588,14 +609,18 @@ function makeConfigCtx(initial = {}) {
   assert.ok(names.includes('web_search'), '目录要包含联网工具')
   assert.equal(entry(catalogue, 'web_search').mode, 'hide', '联网工具默认隐藏')
   assert.equal(entry(catalogue, 'ops_bash').mode, 'inspect', 'shell 默认内容检查')
-  assert.equal(entry(catalogue, 'write').mode, 'keep', '普通工具默认放行')
+  assert.equal(entry(catalogue, 'write').mode, 'inspect', '没配置过的工具默认检查')
   assert.equal(entry(catalogue, 'ops_bash').builtIn, true, '默认分类里的工具要带标记')
-  assert.equal(entry(catalogue, 'write').builtIn, false, '默认放行的工具不算内置项')
+  assert.equal(entry(catalogue, 'write').builtIn, false, '默认检查的工具不算内置项')
 
   const kept = await call3(agent, 'mode web_search keep')
   assert.equal(kept.kind, 'success', `mode keep 应成功：${kept.text}`)
   assert.equal(entry(toolsOf(kept.text), 'web_search').mode, 'keep', '改完目录立即变化')
   assert.equal(values.sessionModes.c15.web_search, 'keep', '落盘到 sessionModes')
+
+  const refused = await call3(agent, 'mode write refuse')
+  assert.equal(refused.kind, 'success', `refuse 应成功：${refused.text}`)
+  assert.equal(entry(toolsOf(refused.text), 'write').mode, 'refuse', '目录要认第四态')
 
   const dropped = await call3(agent, 'mode ops_bash hide')
   assert.equal(entry(toolsOf(dropped.text), 'ops_bash').mode, 'hide', '内置项也能改')

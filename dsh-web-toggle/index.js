@@ -49,7 +49,7 @@ export const Config = z.object({
   settingsSection: z.boolean().default(true).volatile().description('Add a "Web switch" section to the settings sidebar.'),
   composerPanel: z.boolean().default(true).volatile().description('Show the small arrow next to the composer toggle that opens this Session\'s panel.'),
   debug: z.boolean().default(false).volatile().description('Write the machine-readable state into every command receipt. Off by default: a successful command prints one short line, and errors always print in full.'),
-  toolModes: z.dict(z.string()).default({}).volatile().description('Per-tool mode (keep|hide|inspect) for every Session; a tool named nowhere stays available.'),
+  toolModes: z.dict(z.string()).default({}).volatile().description('Per-tool mode (keep|hide|inspect|refuse) for every Session; a tool named nowhere stays available.'),
   sessionModes: z.dict(z.dict(z.string())).default({}).volatile().description('Per-tool mode overrides for one Session, keyed by Session id.'),
 })
 
@@ -82,21 +82,29 @@ const OFFLINE_NOTICE =
   'switch back on for a while. Do the same if you suspect a false positive.'
 
 /**
- * The three modes a tool can have while the network is off. This is the plugin's whole
+ * The four modes a tool can have while the network is off. This is the plugin's whole
  * vocabulary: the panels, the command line and the configuration file all use it.
  *
  * - `keep`    the tool stays visible and usable.
  * - `hide`    the tool disappears from the model's catalog: it cannot see or call it.
+ *             Hiding rewrites the tool list, which also invalidates the prompt cache of
+ *             the next request — the price of making a tool truly unreachable.
  * - `inspect` the tool stays visible, but every call is checked before it runs (see
- *             `networkGuard`). Right now only `ops_bash` can be checked this way,
- *             because it is the tool that carries a command line to read.
+ *             `callGuard`). Meant for general-purpose tools such as the shell, which
+ *             carry a command line to read; the tool list (and the cache) is untouched.
+ * - `refuse`  the tool stays visible in the catalog, but every call is refused before it
+ *             runs, without reading its arguments. It is the cache-friendly hard block:
+ *             the model still sees the tool, gets a written refusal, and the request
+ *             prefix does not change from on to off.
  *
- * Anything not named anywhere defaults to `keep`. A public release cannot assume which
- * plugins a deployment has installed, so the closed form is "hide only what is known to
- * reach the network, leave the rest alone" — a tool this plugin has never heard of is
- * the deployment's business, not this switch's.
+ * Anything not named anywhere defaults to `inspect`: a tool this plugin has never heard
+ * of is still allowed to run, but its arguments are scanned first. A public release
+ * cannot assume which plugins a deployment has installed, so the shape is "hide what is
+ * known to reach the network, check everything else, except what the configuration
+ * explicitly keeps". Inspecting is also the cache-friendly choice: unlike `hide`, it does
+ * not change the tool list, so the prompt prefix survives a switch.
  */
-const MODES = ['keep', 'hide', 'inspect']
+const MODES = ['keep', 'hide', 'inspect', 'refuse']
 
 /** The one tool whose calls can be inspected: it carries a command string to read. */
 const INSPECT_NAME = 'ops_bash'
@@ -124,9 +132,20 @@ const DEFAULT_HIDE = new Set([
 ])
 
 /**
+ * Whether this plugin ships an opinion about a name at all (as opposed to falling back
+ * to the blanket `inspect`). The panels badge exactly these rows.
+ * @param name - the tool name.
+ */
+function curated(name) {
+  return name === INSPECT_NAME || DEFAULT_HIDE.has(name) || HIDE_PREFIXES.some((prefix) => name.startsWith(prefix))
+}
+
+/**
  * The mode this plugin ships for a tool it has never been told about.
  * Hiding by prefix rather than by an exhaustive list is deliberate: a new `web_*` tool
- * must not need a plugin update before the switch covers it.
+ * must not need a plugin update before the switch covers it. Everything else falls back
+ * to `inspect`, so an unknown third-party tool still runs, but its arguments are read
+ * first; the configuration can move any specific name to `keep`.
  * @param name - the tool name.
  * @returns `inspect`, `hide`, or `keep`.
  */
@@ -134,7 +153,7 @@ function defaultMode(name) {
   if (name === INSPECT_NAME) return 'inspect'
   if (HIDE_PREFIXES.some((prefix) => name.startsWith(prefix))) return 'hide'
   if (DEFAULT_HIDE.has(name)) return 'hide'
-  return 'keep'
+  return 'inspect'
 }
 
 /**
@@ -451,22 +470,57 @@ export function apply(ctx, config) {
    */
   const offSessions = new Map()
 
+  /** 参数最多读这么多字符：再多也只扫前一段，避免大载荷拖慢每次调用。 */
+  const MAX_ARGUMENT_CHARS = 32 * 1024
+
   /**
-   * Refuse one guarded call when the command looks like network traffic.
-   * Runs before dispatch (the kernel's `tools.guard()`), only while the switch is off,
-   * and only for tools in the `inspect` mode (`ops_bash` by default).
-   * It fails closed: a guarded call whose arguments
+   * Flatten a call's arguments into one searchable string. Only what a shallow JSON view
+   * can show is read: deeply nested or cyclic payloads are not worth the cost here.
+   * @param args - the tool call's arguments.
+   * @returns the text, or undefined when there is nothing to read.
+   */
+  function argumentText(args) {
+    if (args === null || typeof args !== 'object') {
+      return typeof args === 'string' ? args.slice(0, MAX_ARGUMENT_CHARS) : undefined
+    }
+    try {
+      const text = JSON.stringify(args)
+      return typeof text === 'string' ? text.slice(0, MAX_ARGUMENT_CHARS) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Refuse one guarded call, deciding by that tool's mode.
+   * Runs before dispatch (the kernel's `tools.guard()`), only while the switch is off.
+   * `refuse` tools are rejected unconditionally; `inspect` tools are checked for network
+   * traffic in their arguments. Everything else passes straight through.
+   * The check fails closed: an inspected call whose arguments
    * carry no readable command is refused rather than guessed through.
    * @param exec - the pending execution (`{ name, arguments, agent, ... }`).
    * @returns a denial reason, or undefined to let the call through.
    */
-  function networkGuard(exec) {
+  function callGuard(exec) {
     if (exec === null || typeof exec !== 'object') return undefined
-    if (exec.name !== INSPECT_NAME) return undefined
+    const mode = exec.agent === undefined ? defaultMode(exec.name) : modeOf(exec.agent, exec.name)
+    if (mode === 'refuse') {
+      return `本会话已断网：${exec.name} 被设为「调用时拒绝」，这次调用不会执行，也不必换个写法重试。${OFFLINE_NOTICE}`
+    }
+    if (mode !== 'inspect') return undefined
     const args = exec.arguments
     const command = args !== null && typeof args === 'object' ? args.command : undefined
-    if (typeof command !== 'string') {
+    // `ops_bash` 是「有命令就必须能读」的那一个：读不到命令文本就当检查不了，宁可拒绝。
+    if (exec.name === INSPECT_NAME && typeof command !== 'string') {
       return `本会话已断网：这条工具调用没有可检查的命令文本，为稳妥起见拒绝执行。${OFFLINE_NOTICE}`
+    }
+    // 没有命令文本可读的工具（MCP、生图、读取器……）：退一步看参数本身。
+    if (typeof command !== 'string') {
+      const spilled = argumentText(args)
+      if (spilled !== undefined && looksNetworked(spilled)) {
+        return `本会话已断网：这次 ${exec.name} 调用的参数看起来会联网（网络 URL、下载或远程地址），已被拦下。纯本地的调用照常执行。${OFFLINE_NOTICE}`
+      }
+      return undefined
     }
     if (looksNetworked(command)) {
       return `本会话已断网：这条命令看起来会联网（下载、远程连接或网络 URL），已被拦下。本地命令照常可以执行。${OFFLINE_NOTICE}`
@@ -591,7 +645,7 @@ export function apply(ctx, config) {
         agent,
         'success',
         changed
-          ? '已断网：从下一次请求起，设为「隐藏」的工具消失，设为「内容检查」的工具（默认 shell）保留但每次调用都会被检查，其余工具照常可用。 / Network off for this session: hidden tools disappear, inspected tools (the shell by default) stay but every call is checked, and everything else keeps working.'
+          ? '已断网：从下一次请求起，设为「隐藏」的工具消失；设为「内容检查」的工具保留但每次调用都会检查内容；设为「调用时拒绝」的工具保留可见但调用一律被拒；其余工具照常可用。 / Network off for this session: hidden tools disappear, inspected tools stay but every call is checked, refused tools stay visible but every call is blocked, and everything else keeps working.'
           : '本会话本来就是断网状态，没有重复加限制。 / The network was already off for this session.',
       )
     }
@@ -674,19 +728,22 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Split the catalog by mode: what must disappear while the network is off, and what
-   * must stay visible but be checked on every call.
+   * Split the catalog by mode: what must disappear while the network is off, what must
+   * stay visible but be checked on every call, and what must stay visible but be
+   * refused outright.
    * @param agent - the Agent whose catalog is split.
    */
   function splitByMode(agent) {
     const hide = []
     const inspect = []
+    const refuse = []
     for (const name of scopedNames(agent)) {
       const mode = modeOf(agent, name)
       if (mode === 'hide') hide.push(name)
       else if (mode === 'inspect') inspect.push(name)
+      else if (mode === 'refuse') refuse.push(name)
     }
-    return { hide, inspect }
+    return { hide, inspect, refuse }
   }
 
   /**
@@ -725,7 +782,7 @@ export function apply(ctx, config) {
   function switchOff(agent) {
     const sessionId = agent.session.id
     pendingSeries.add(sessionId)
-    const { hide, inspect } = splitByMode(agent)
+    const { hide, inspect, refuse } = splitByMode(agent)
     const opened = openRestriction(agent, hide)
     if (opened.error !== undefined) {
       pendingSeries.delete(sessionId)
@@ -733,7 +790,7 @@ export function apply(ctx, config) {
     }
     let disposeGuard
     try {
-      if (inspect.length > 0) disposeGuard = agent.ctx.tools.guard(networkGuard)
+      if (inspect.length + refuse.length > 0) disposeGuard = agent.ctx.tools.guard(callGuard)
     } catch (error) {
       // The restriction is already applied; lift it again so "off" never half-lands.
       safely(() => opened.dispose())
@@ -779,16 +836,16 @@ export function apply(ctx, config) {
         skipped += 1
         continue
       }
-      const { hide, inspect } = splitByMode(row.agent)
+      const { hide, inspect, refuse } = splitByMode(row.agent)
       const opened = openRestriction(row.agent, hide)
       if (opened.error !== undefined) {
         skipped += 1
         continue
       }
       let disposeGuard
-      if (inspect.length > 0) {
+      if (inspect.length + refuse.length > 0) {
         try {
-          disposeGuard = row.agent.ctx.tools.guard(networkGuard)
+          disposeGuard = row.agent.ctx.tools.guard(callGuard)
         } catch {
           disposeGuard = undefined
         }
@@ -813,6 +870,7 @@ export function apply(ctx, config) {
   /**
    * Parse one word into a mode. `on`/`off` are accepted as the older spelling of
    * `keep`/`hide`, so a panel cached in a browser tab keeps working across an upgrade.
+   * `reject`/`block`/`deny` are accepted for `refuse`.
    * @param token - the word after the tool name.
    */
   function parseMode(token) {
@@ -821,6 +879,7 @@ export function apply(ctx, config) {
     if (value === 'keep' || value === 'on' || value === 'true' || value === '1' || value === 'show' || value === 'yes') return 'keep'
     if (value === 'hide' || value === 'off' || value === 'false' || value === '0' || value === 'drop' || value === 'no') return 'hide'
     if (value === 'inspect' || value === 'check' || value === 'scan' || value === 'match' || value === 'pattern') return 'inspect'
+    if (value === 'refuse' || value === 'reject' || value === 'block' || value === 'blocked' || value === 'deny') return 'refuse'
     return undefined
   }
 
@@ -868,10 +927,10 @@ export function apply(ctx, config) {
   /** One sentence describing the surface switches and the current split. */
   function describeConfig(agent) {
     const surfaces = surfacesOf()
-    const { hide, inspect } = splitByMode(agent)
+    const { hide, inspect, refuse } = splitByMode(agent)
     const flags = `pluginPage=${surfaces.plugin ? 'on' : 'off'} settingsSection=${surfaces.settings ? 'on' : 'off'} composerPanel=${surfaces.composer ? 'on' : 'off'}`
     const writable = canSave() ? '' : '（本 profile 不能写配置，改动只在本次运行生效 / this profile cannot save, changes last until restart）'
-    return `${flags}；隐藏 ${hide.length} 个、内容检查 ${inspect.length} 个，其余放行 / hiding ${hide.length}, inspecting ${inspect.length}, everything else kept.${writable}`
+    return `${flags}；隐藏 ${hide.length} 个、内容检查 ${inspect.length} 个、调用时拒绝 ${refuse.length} 个，其余放行 / hiding ${hide.length}, inspecting ${inspect.length}, refusing ${refuse.length}, everything else kept.${writable}`
   }
 
   /**
@@ -886,7 +945,7 @@ export function apply(ctx, config) {
     return {
       tools: [...names]
         .sort((left, right) => left.localeCompare(right))
-        .map((name) => ({ name, mode: modeOf(agent, name), builtIn: defaultMode(name) !== 'keep' })),
+        .map((name) => ({ name, mode: modeOf(agent, name), builtIn: curated(name) })),
     }
   }
 
@@ -986,8 +1045,8 @@ export function apply(ctx, config) {
       name = tokens[0] ?? ''
       mode = parseMode(tokens[1])
     }
-    if (name === '') return result(agent, 'error', `用法 / usage: /${COMMAND} mode <tool> keep|hide|inspect [--global]`)
-    if (mode === undefined) return result(agent, 'error', `用法 / usage: /${COMMAND} mode ${name} keep|hide|inspect [--global]`)
+    if (name === '') return result(agent, 'error', `用法 / usage: /${COMMAND} mode <tool> keep|hide|inspect|refuse [--global]`)
+    if (mode === undefined) return result(agent, 'error', `用法 / usage: /${COMMAND} mode ${name} keep|hide|inspect|refuse [--global]`)
     const saved = await writeMode(agent, name, mode, global)
     if (!saved.saved) return result(agent, 'error', `没能保存工具设置 / Could not save the tool mode: ${saved.reason}`)
     const tuned = retune()
@@ -999,7 +1058,9 @@ export function apply(ctx, config) {
         ? `已让 ${name} 在断网时隐藏 / "${name}" is hidden while the network is off.`
         : mode === 'inspect'
           ? `已让 ${name} 在断网时保留，但每次调用都会检查内容 / "${name}" stays visible while the network is off, with every call inspected.`
-          : `已让 ${name} 在断网时保留 / "${name}" stays available while the network is off.`
+          : mode === 'refuse'
+            ? `已让 ${name} 在断网时保留可见，但每次调用都会被拒绝 / "${name}" stays visible while the network is off, and every call is refused.`
+            : `已让 ${name} 在断网时保留 / "${name}" stays available while the network is off.`
     return result(agent, 'success', `${warning}${note}（${scope}）${tunedText(tuned)} ${describeConfig(agent)}`, diagnostics())
   }
 
@@ -1035,7 +1096,7 @@ export function apply(ctx, config) {
     if (requested !== '' && requested !== 'on' && requested !== 'off') {
       return {
         kind: 'error',
-        text: `用法 / usage: /${COMMAND} [on|off|status] | /${COMMAND} tools | /${COMMAND} mode <tool> keep|hide|inspect [--global] | /${COMMAND} surface <plugin|settings|composer> on|off`,
+        text: `用法 / usage: /${COMMAND} [on|off|status] | /${COMMAND} tools | /${COMMAND} mode <tool> keep|hide|inspect|refuse [--global] | /${COMMAND} surface <plugin|settings|composer> on|off`,
       }
     }
     const current = isOff(agent)
@@ -1058,8 +1119,8 @@ export function apply(ctx, config) {
 
   ctx.commands.register({
     name: COMMAND,
-    description: 'Turn this Session\'s network tools off, and decide per tool what the switch hides, keeps, or inspects.',
-    input: { hint: 'on|off|status|tools|mode <tool> keep|hide|inspect [--global]|mode reset [--global]|surface <plugin|settings|composer> on|off' },
+    description: 'Turn this Session\'s network tools off, and decide per tool what the switch keeps, hides, inspects, or refuses.',
+    input: { hint: 'on|off|status|tools|mode <tool> keep|hide|inspect|refuse [--global]|mode reset [--global]|surface <plugin|settings|composer> on|off' },
     handler: ({ agent, rawInput }) => toggle(agent, rawInput),
   })
 }

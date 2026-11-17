@@ -17,7 +17,7 @@
 | `/webtoggle config` | 看面板配置与按模式的统计 |
 | `/webtoggle tools` | 列出内核当前全部工具 + 每个工具的模式 |
 | `/webtoggle surface <settings\|composer> on\|off` | 开关某处面板（`plugin` 固定显示，见下） |
-| `/webtoggle mode <tool> keep\|hide\|inspect [--global]` | 给某个工具定模式（默认本会话） |
+| `/webtoggle mode <tool> keep\|hide\|inspect\|refuse [--global]` | 给某个工具定模式（默认本会话） |
 | `/webtoggle mode reset [--global]` | 这一层模式表交还上一层 |
 | `/webtoggle keep <tool> on\|off [--global]` | `mode` 的旧写法（`on` → keep，`off` → hide） |
 | `/webtoggle allow add\|remove <tool> [--global]` | 更早的写法，仍可用 |
@@ -26,22 +26,25 @@
 
 错误结果不附加任何机器标记（默认模式下），错误信息本身始终完整。
 
-## 三种模式
+## 四种模式
 
 | 模式 | 断网时 | 用途 |
 | --- | --- | --- |
-| `keep` | 照常可见、不做检查 | 纯本地工具，或你信任的工具 |
+| `keep` | 照常可见、不做检查 | 确认是纯本地的工具 |
 | `hide` | 从工具列表消失（`restrict({ deny })`） | 一看就是联网的通道 |
-| `inspect` | 保留可见，但每次调用前过 `tools.guard()` 内容检查 | 双用途执行器（默认 `ops_bash`） |
+| `inspect` | 保留可见，但每次调用前过 `tools.guard()` 检查参数 | 双用途执行器、没被点名的工具 |
+| `refuse` | 保留可见，但每次调用直接拒绝（不读参数） | 一律不许用、又不想改工具列表 |
 
-出厂默认：`ops_bash` → `inspect`；名字以 `web_` / `bsk_` / `computer_` / `mcp__` / `video_` / `workbuddy_` / `snowluma_` 开头的，以及 `plugin_manager`、`schedule_create`、`schedule_edit`、`subagent`、`subagent_fork`、`workflow`、`send_message`、`wait_agent`、`list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource` → `hide`；其余 → `keep`。
+只有 `hide` 会改工具列表，因此也只有它会打断提示词缓存；其余三种在断网期间只是调用前多一道判断。
 
-之所以从「白名单」改回「例外表」：插件要能公开发布，就不能假设别人装了什么。白名单是 fail-closed，别人新装的工具会被无故挡掉；例外表是 fail-open，只挡明确列出的通道。
+出厂默认：名字以 `web_` / `bsk_` / `computer_` / `mcp__` / `video_` / `workbuddy_` / `snowluma_` 开头的，以及 `plugin_manager`、`schedule_create`、`schedule_edit`、`subagent`、`subagent_fork`、`workflow`、`send_message`、`wait_agent`、`list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource` → `hide`；**其余全部 → `inspect`**（`ops_bash` 也在其中）；`refuse` 出厂不指派给任何工具。
+
+之所以从「白名单」改回「例外表」：插件要能公开发布，就不能假设别人装了什么。白名单是 fail-closed，别人新装的工具会被无故挡掉。例外表只挡明确列出的通道，没列出的名字落在 `inspect` 上——可见、可用，但断网时参数仍会被检查一次；确认安全的工具由用户自己升到 `keep`。
 
 ## 行为
 
 - 关闭后，本会话的 Agent 上下文被 `tools.restrict({ deny: [...hide] })` 加上遮罩：下一次请求的工具声明里没有那些名字，模型硬调用只会得到 unknown tool。`deny` 为空时**完全不限制**（没有 hide 名单就不需要遮罩）。
-- `inspect` 名单非空时才注册 `tools.guard()`：命令文本命中联网特征（`curl`/`wget`/`ssh`/`git clone`/`pnpm add`/`pip install`/`http(s)://`/UNC 共享/导入 `http`,`net`,`tls` 模块等）就在执行前被拒绝，本地命令照常跑。guard 与 restrict 同作用域，恢复时一并撤销。
+- `inspect` 或 `refuse` 名单非空时才注册 `tools.guard()`：按 `exec.name` 查模式——`refuse` 直接拒（不读参数）；`inspect` 有命令文本的先查命令、再查它要执行的脚本与 `package.json` 脚本，没有命令文本的（MCP、读取器、生图……）退一步查参数 JSON。命中联网特征（`curl`/`wget`/`ssh`/`git clone`/`pnpm add`/`pip install`/`http(s)://`/UNC 共享/导入 `http`,`net`,`tls` 模块等）就在执行前被拒绝，本地调用照常跑。guard 与 restrict 同作用域，恢复时一并撤销。
 - 被隐藏的工具名字只留内核肯接受的（见下「工具目录怎么来的」），插件没装或没有某个工具时不会因为 `restrict()` 报 unknown tool 而整体失败：拒绝时解析内核名单、取交集重试一次。
 - 恢复时调用当时存下的 disposer，遮罩被精确撤销，工具列表原样回来。
 - 状态按**会话**记录，互不影响：关掉 A 会话不会影响 B 会话，也不影响其他会话的本地工作。
@@ -58,11 +61,11 @@
 | `plugins.detail.section` | `web-toggle` | 插件详情页的全局面板（只认本包） |
 
 - 入口开关是**真卸载**：关掉时把 `ctx.slots.register` 的 disposer 连同它的 `ctx.effect` 一起撤销，导航项与图标一起消失；重新打开时再注册回来。详情页那一处**永不卸载**——它是把另外两个入口重新打开的保底，命令层面 `surface plugin off` 只回一句说明。
-- 三个面板里都有「工具」区：列出全部工具、每行一个按钮，点一下在 `keep → hide → inspect → keep` 之间循环，发 `mode <name> <next>[ --global]`；筛选框只做本地过滤。
+- 三个面板里都有「工具」区：列出全部工具、每行一个按钮，点一下在 `keep → hide → inspect → refuse → keep` 之间循环，发 `mode <name> <next>[ --global]`；按钮上写的就是当前模式，筛选框只做本地过滤。
 - 设置页与详情页拿不到 sessionId（owner props 只有 `close` / `subject`），所以它们执行命令时用「最后一个画过的会话」：模块级 `lastSessionId` → localStorage `dsh-web-toggle:last-session` → 客户端已知的第一个会话。命中不了就如实提示「先打开任意一个任务」。
 - 配置写入只走 `configEditor.edit(entry, current => …)`：拿不到编辑器时**如实报错**（`没有配置文件可写`、`writable: false`），绝不假装保存。
 - 配置字段都是 `.volatile()`：改值原地生效，不重启插件。写入用 `saves` promise 串行化，避免两次点击互相覆盖。
-- 模式是**分层**的：`sessionModes[sid][name]` → `toolModes[name]` → `defaultMode(name)`。往某一层写的时候，若值恰好等于从上层继承来的值，就把这一条**删掉**（而不是记一条同样的），所以「恢复默认」在面板上看是自动回到出厂模式，`mode reset` 则把整层交还给上一层。
+- 模式是**分层**的：`sessionModes[sid][name]` → `toolModes[name]` → `defaultMode(name)`（出厂默认见上，兜底是 `inspect`）。往某一层写的时候，若值恰好等于从上层继承来的值，就把这一条**删掉**（而不是记一条同样的），所以「恢复默认」在面板上看是自动回到出厂模式，`mode reset` 则把整层交还给上一层。
 - 工具目录怎么来的：`restrict()` 的校验用的是 `this.view(scopeOf(this.ctx)).restrictableNames`，而 `scopeOf` 用的 `kScope` 符号没有导出给插件，`view()` 不带参数又只是全局视图（看不到 profile 围绕 Agent 组合出来的名字）。所以拿到目录的办法是**让 restrict 自己报**：先 `restrict({ deny: ['__webtoggle_probe__'] })`，成功说明探针名居然存在（立刻 dispose），失败就从 `names unknown global tool "…"; known global tools: …` 的尾部解析出该作用域接受的完整名单。真正下发时若仍被拒（名单里混进了不存在的名字），再来一次 `openRestriction()`：解析内核名单、取交集重试。
 - 目录里还会并入配置中出现过、但当前没注册的名字：这样把工具卸掉之后仍然能在面板里看到它、把模式改回 `keep`。
 - 已经在断网状态时改模式（`retune()`）：先按新名单建好新的 restrict + guard，再撤销旧的，中间不会出现「变宽」的空档；正在执行的轮次跳过并在回执里写 `跳过 N（正在执行）`，等下一轮切开关时自然带上新名单。

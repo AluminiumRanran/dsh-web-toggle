@@ -21,11 +21,11 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 8. 非法参数回 error
 9. `agent/disposed` 触发时撤销限制并清记录；同一 sessionId 的新 agent 回到"开"
 10. `agent/pre-step`：变化后下一步返回 `startsRequestSeries: true`，只消费一次；`signal.aborted` 的步骤不消费标记
-11. 出厂三态分类：`web_*` / `bsk_*` / `computer_*` / `mcp__*` / `video_*` / `workbuddy_*` / `snowluma_*` 前缀与显式联网名 → `hide`；`ops_bash` → `inspect`；`read` / `write` / `ops_glob` / `acp_cache` 等 → `keep`；目录里没注册的名字被过滤而不是抛错
+11. 出厂四态分类：`web_*` / `bsk_*` / `computer_*` / `mcp__*` / `video_*` / `workbuddy_*` / `snowluma_*` 前缀与显式联网名 → `hide`；`ops_bash` 与**所有没点名的工具** → `inspect`；`refuse` 出厂不指派；目录里没注册的名字被过滤而不是抛错
 12. shell 命令过滤：三层规则各拦一批（红队复现命令），同时放行日常本地命令
 13. 配置面：默认两个入口开、详情页恒开；`surface settings off` 落到配置且只写一次；`surface plugin off` 只回一句「始终显示」且不改配置；未知入口与缺值给用法错误；`mode` 与继承值相同则不落盘、`--global` 写全局层、`mode reset` 交还整层、`keep on|off` 与 `allow add|remove` 别名等价、`config` 输出含 `pluginPage=`；没有 configEditor 时如实回报 `没有配置文件可写` 与 `writable:false`
-14. 模式改动即时生效：断网状态下执行 `mode ops_bash keep` 后是「新的 restrict + guard 上、旧的撤」，旧 disposer 被 lift；轮次正在执行时只存配置不下发并回执 `跳过 1`；恢复再断网时带上新模式
-15. 工具目录与 `mode`：`tools` 回 `[web-tools]`（按名字排序、每行含 `mode`/`builtIn`）；`mode web_search keep` 后目录立刻变；`mode ops_bash keep` 之后不再注册 guard；`mode reset` 删键回默认；`--global` 写全局层；不存在的名字也进目录并有提醒
+14. 模式改动即时生效：断网状态下 `mode ops_bash keep` 之后 guard 仍要重装（其他工具还是 `inspect`），新 guard 不再拦 shell 命令；`mode ops_bash refuse` 后连 `echo hi` 也直接拒；`read_image` 的参数里带 `https://` 被拦、本地路径放行；轮次正在执行时只存配置不下发并回执 `跳过 1`；恢复再断网时带上新模式
+15. 工具目录与 `mode`：`tools` 回 `[web-tools]`（按名字排序、每行含 `mode`/`builtIn`）；没配置过的工具也报 `inspect`；`mode web_search keep` / `mode write refuse` 后目录立刻变；`mode reset` 删键回默认；`--global` 写全局层；不存在的名字也进目录并有提醒
 16. 回执降噪：默认配置下 `status`/`off`/`mode` 的回执不带 `[web-state]` JSON，`tools` 永远带；错误信息完整且不带 JSON；`debug: true` 时成功回执才带机器标记
 
 `tests/client.test.mjs` 覆盖（14 组）：
@@ -38,7 +38,7 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 6. 轮次进行中：按钮 `disabled`，标题换成 `title.running`
 7. 失败分支：没有 remote、命令未注册（`value === undefined`）、Remote 报错、Host 明确拒绝（原文展示、状态不变）
 8. 挂载探针纠偏：记住 off 但宿主已重置 → 探针把显示改成亮态并提示 `note.syncedOn`
-9. 小箭头面板：点开时只发 `tools`（不发 `status`）；「断网」发 `/webtoggle off`；工具行按钮在 `hide → inspect → keep → hide` 循环（`data-mode` 与命令文本都跟着变）；筛选框只在本地过滤、不发命令
+9. 小箭头面板：点开时只发 `tools`（不发 `status`）；「断网」发 `/webtoggle off`；工具行按钮在 `hide → inspect → refuse → keep → hide` 循环（`data-mode` 与命令文本都跟着变，按钮文字是当前模式）；筛选框只在本地过滤、不发命令
 10. 配置关掉小箭头后不再画箭头，开关本身照常
 11. 设置页面板：内联渲染、工具行的 `data-mode` 反映全局模式表、不画本会话开关；点「隐藏」发 `surface settings off`；关掉后页面自己 `return null`；从别处取回状态后画回来；工具模式命令带 `--global`
 12. 插件详情页只对本包渲染，别的包 `null`

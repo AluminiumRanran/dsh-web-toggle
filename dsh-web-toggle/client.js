@@ -120,6 +120,7 @@ window.__ModuleLoader__.load({
 .dswt-btn[data-mode="keep"]{color:var(--dsw-alias-state-success-primary,#2f9e44)}
 .dswt-btn[data-mode="inspect"]{color:var(--dsw-alias-state-warning-primary,#e8590c)}
 .dswt-btn[data-mode="hide"]{opacity:.72}
+.dswt-btn[data-mode="refuse"]{color:var(--dswt-danger,#e03131)}
 .dswt-add{display:flex;gap:6px;align-items:center}
 .dswt-input{flex:1;min-width:0;height:26px;padding:0 7px;border-radius:6px;border:1px solid var(--dsw-alias-border-neutral,rgba(127,127,127,.35));background:var(--dsw-alias-bg-base,transparent);color:inherit;font:inherit}
 .dswt-input:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary))}
@@ -157,7 +158,7 @@ window.__ModuleLoader__.load({
         'panel.thisTask': 'This task',
         'panel.switchOff': 'Cut the network',
         'panel.switchOn': 'Restore the network',
-        'panel.stateOff': 'Off: hidden tools are gone, inspected ones stay but every call is checked.',
+        'panel.stateOff': 'Off: hidden tools are gone, inspected calls are checked, refused tools stay visible but every call is blocked.',
         'panel.stateOn': 'On: the full tool list is available.',
         'panel.sessionKeep': 'Extra tools this task keeps',
         'panel.globalKeep': 'Extra tools every task keeps',
@@ -168,6 +169,7 @@ window.__ModuleLoader__.load({
         'panel.mode.keep': 'keep',
         'panel.mode.hide': 'hide',
         'panel.mode.inspect': 'inspect',
+        'panel.mode.refuse': 'refuse call',
         'panel.builtIn': 'built-in',
         'panel.cycle': 'Click to switch this tool to the next mode',
         'panel.alwaysOn': 'always shown',
@@ -181,7 +183,7 @@ window.__ModuleLoader__.load({
         'panel.surface.composer': 'Caret beside the composer toggle',
         'panel.show': 'Show',
         'panel.hide': 'Hide',
-        'panel.hint.keep': 'Every tool has one of three modes: keep it, hide it, or inspect every call. Anything not named here stays available, so the switch only takes away what it knows reaches the network.',
+        'panel.hint.keep': 'Every tool has one of four modes: keep, hide, inspect every call, or refuse every call. Hiding rewrites the tool list (and costs a cache miss); inspecting and refusing leave the list untouched. A tool named nowhere is inspected.',
         'panel.hint.global': 'This list covers every task. The per-task list lives in the caret beside the composer toggle.',
         'panel.hint.session': 'Only this task is affected; other tasks keep their own switch.',
         'panel.hint.readonly': 'This profile cannot save configuration, so changes last until the app restarts.',
@@ -215,7 +217,7 @@ window.__ModuleLoader__.load({
         'panel.thisTask': '本任务',
         'panel.switchOff': '断网',
         'panel.switchOn': '恢复联网',
-        'panel.stateOff': '已断网：隐藏的工具不再出现，内容检查的工具保留但每次调用都会被检查。',
+        'panel.stateOff': '已断网：隐藏的工具不再出现；检查的工具保留但每次调用都会看参数；调用时拒绝的工具保留可见但调用一律被拒。',
         'panel.stateOn': '已联网：完整工具列表可用。',
         'panel.sessionKeep': '本任务额外保留的工具',
         'panel.globalKeep': '所有任务额外保留的工具',
@@ -223,9 +225,10 @@ window.__ModuleLoader__.load({
         'panel.globalTools': '所有任务的工具',
         'panel.filter': '筛选工具',
         'panel.noTools': '没有匹配的工具。',
-        'panel.mode.keep': '保留',
-        'panel.mode.hide': '隐藏',
-        'panel.mode.inspect': '内容检查',
+        'panel.mode.keep': '放行',
+        'panel.mode.hide': '拒绝',
+        'panel.mode.inspect': '检查',
+        'panel.mode.refuse': '调用时拒绝',
         'panel.builtIn': '内置',
         'panel.cycle': '点一下切到下一种模式',
         'panel.alwaysOn': '始终显示',
@@ -239,7 +242,7 @@ window.__ModuleLoader__.load({
         'panel.surface.composer': '输入框开关旁的小箭头',
         'panel.show': '显示',
         'panel.hide': '隐藏',
-        'panel.hint.keep': '每个工具有三种模式：保留、隐藏、内容检查。没在本页出现的工具一律照常可用——断网只拿走它确认会联网的那些。',
+        'panel.hint.keep': '每个工具有四种模式：放行、拒绝（从列表移除）、检查（保留可见，每次调用看参数）、调用时拒绝（保留可见，调用一律被拒）。没配置过的工具默认「检查」；「检查」和「调用时拒绝」不会改动工具列表，缓存不掉。',
         'panel.hint.global': '这里是所有任务共用的名单；单个任务的名单在输入框开关旁的小箭头里。',
         'panel.hint.session': '只影响本任务，其他任务各有各的开关。',
         'panel.hint.readonly': '这个 profile 不能保存配置，改动在应用重启后失效。',
@@ -552,11 +555,10 @@ window.__ModuleLoader__.load({
         const catalogue = Array.isArray(props.catalogue) ? props.catalogue : []
         const needle = filter.trim().toLowerCase()
         // 三态循环的顺序：保留 → 隐藏 → 内容检查 → 保留。
-        const MODE_CYCLE = ['keep', 'hide', 'inspect']
-        const currentMode = (entry) => (entry.mode === 'hide' || entry.mode === 'inspect' ? entry.mode : 'keep')
+        const MODE_CYCLE = ['keep', 'hide', 'inspect', 'refuse']
+        const currentMode = (entry) => (MODE_CYCLE.includes(entry.mode) ? entry.mode : 'keep')
         const nextMode = (mode) => MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length]
-        const modeLabel = (mode) =>
-          t(mode === 'inspect' ? 'panel.mode.inspect' : mode === 'hide' ? 'panel.mode.hide' : 'panel.mode.keep')
+        const modeLabel = (mode) => t(`panel.mode.${MODE_CYCLE.includes(mode) ? mode : 'keep'}`)
         const rows = catalogue.filter((entry) => needle === '' || String(entry.name).toLowerCase().includes(needle))
         const scopeFlag = global ? ' --global' : ''
 
