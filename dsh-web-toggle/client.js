@@ -621,7 +621,7 @@ window.__ModuleLoader__.load({
         const face = settingsFace()
         if (face === undefined) return { ok: false, text: t('error.noRemote') }
         try {
-          const response = await face.describe({ redactSecrets: true })
+          const response = await face.describe()
           if (response === undefined || response.ok !== true) {
             return { ok: false, text: format(t('error.failed'), { reason: describeFailure(response === undefined ? undefined : response.error, t) }) }
           }

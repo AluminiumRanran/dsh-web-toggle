@@ -325,7 +325,10 @@ function fakeHost(initial = {}) {
     catalogue,
     remote: {
       settings: {
-        describe: async () => {
+        describe: async (...args) => {
+          // 真实内核按声明校验参数个数：settings/describe 是零参数，多传一个就报
+          // 「expected 0 argument(s), got 1」，所以这里照抄，防止再写出带参数的调用。
+          if (args.length > 0) throw new Error(`client api: settings/describe expected 0 argument(s), got ${args.length}`)
           state.describes += 1
           return {
             ok: true,
