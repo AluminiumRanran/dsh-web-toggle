@@ -23,6 +23,10 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 10. `agent/pre-step`：变化后下一步返回 `startsRequestSeries: true`，只消费一次；`signal.aborted` 的步骤不消费标记
 11. 白名单内容：`ops_bash` / `web_*` / `bsk_*` / `computer_*` / `mcp__*` / `video_*` / `workbuddy_*` / `subagent` / `workflow` / `plugin_manager` / `schedule_create` 全部不在 allow 里；本地文件类工具在；未列入白名单的本地工具（`read`）也被隐藏（fail closed）；目录里没注册的名字被过滤而不是抛错
 
+12. shell 命令过滤：三层规则各拦一批（红队复现命令），同时放行日常本地命令
+13. 配置面：默认三个入口都开；`surface settings off` 落到配置且只写一次；三个入口都能关再开；未知入口与缺值给用法错误；`allow add read` 进 `sessionTools`、重复不重复、不存在名字被拒、`--global` 不污染会话、`allow remove` 清掉空会话键、`allow clear --global`、`config` 输出含 `pluginPage=`；没有 configEditor 时如实回报 `没有配置文件可写` 与 `writable:false`
+14. 白名单改动即时生效：断网状态下 `allow add read` 后是「新的 restrict + guard 上、旧的撤」，旧 disposer 被 lift；轮次正在执行时只存配置不下发并回执 `跳过 1`；恢复再断网时带上新名单
+
 `tests/client.test.mjs` 覆盖：
 
 1. 默认亮态渲染（`data-off="false"`、`aria-pressed="true"`、标题 = `title.on`），无提示
@@ -33,10 +37,15 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 6. 轮次进行中：按钮 `disabled`，标题换成 `title.running`
 7. 失败分支：没有 remote、命令未注册（`value === undefined`）、Remote 报错、Host 明确拒绝（原文展示、状态不变）
 8. 挂载探针纠偏：记住 off 但宿主已重置 → 探针把显示改成亮态并提示 `note.syncedOn`
+9. 小箭头面板：点开时向宿主问一次 `status`；面板里的「断网」发 `/webtoggle off`；添加保留工具发 `allow add <name>` 并画出 chip；删除发 `allow remove <name>`
+10. 配置关掉小箭头后不再画箭头，开关本身照常
+11. 设置页面板：内联渲染、显示全局保留清单、不画本会话开关；点「隐藏」发 `surface settings off`；关掉后页面自己 `return null`；全局添加发 `allow add <name> --global`
+12. 插件详情页只对本包渲染，别的包 `null`
+13. 配置页在没有 Remote 时如实报错
 
 ## 2. 安装结果
 
-- 包：`dsh-web-toggle@0.1.0`（`file:E:/workspace/dsh-web-toggle-prompt-20261116/dsh-web-toggle`）
+- 包：`dsh-web-toggle@0.1.0` 首次装入，后续升级到 `0.2.0`（`file:E:/workspace/dsh-web-toggle-prompt-20261116/dsh-web-toggle`）
 - 走的是 `plugin_manager install_bundle`，结果 `application: "applied"`、`enabled: true`
 - profile 里新增：`dependencies.dsh-web-toggle`、`dsh.profile.bundles` 里的 `dsh-web-toggle`
 - 备份：`tmp/profile-backup-20261117-115656/`（package.json / pnpm-lock.yaml / cordis.patch.yml）
@@ -52,6 +61,9 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 - [ ] 同会话下一轮：模型工具列表只剩本地工具（`web_*`、`ops_bash`、`bsk_*`、`mcp__*` 都消失），本地读写照常可用
 - [ ] 另一个会话的按钮仍是亮态，可以正常联网
 - [ ] 再点一下恢复，下一轮又能联网
+- [ ] 设置页侧边栏出现「联网开关」，插件详情页出现同样的面板；两处改配置后输入框那一侧立即跟着变
+- [ ] 小箭头能打开本会话面板；在里面加一个工具名后，断网时的工具表里多出它（下一轮生效）
+- [ ] 关掉某个入口后刷新页面，该入口不再出现，其余照常
 - [ ] 宿主控制台没有 `tools.restrict() requires a scoped context` / `names unknown global tool` 这类报错
 - [ ] 重启 DSH 后按钮不报错；若重启前是灭态，刷新后按钮会先向宿主探一次并如实纠正显示
 

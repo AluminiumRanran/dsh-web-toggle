@@ -21,15 +21,42 @@
  * and a rebuilt series sends the new declarations instead of "deferred additions".
  *
  * The Host half has no locale service, so command text is bilingual.
+ *
+ * Configuration lives in this plugin's own profile row and is written through the
+ * config editor, never by rewriting `cordis.patch.yml` by hand. Every field is
+ * `.volatile()`, so an edit lands in the running instance instead of restarting the
+ * plugin: `config.field.get()` is the only read path.
  */
 
 import { readFileSync, statSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 
+import z from '@deepseek-ai/schemastery'
+
 export const inject = ['commands', 'agents', 'tools']
 
 /** The command name. */
 const COMMAND = 'webtoggle'
+
+/**
+ * The bundle's settings. The first three decide which configuration surfaces the
+ * browser half draws; `globalTools` and `sessionTools` widen the allowlist beyond the
+ * built-in local names — per deployment, and per Session.
+ */
+export const Config = z.object({
+  pluginPage: z.boolean().default(true).volatile().description('Show the configuration panel on this bundle\'s detail page.'),
+  settingsSection: z.boolean().default(true).volatile().description('Add a "Web switch" section to the settings sidebar.'),
+  composerPanel: z.boolean().default(true).volatile().description('Show the small arrow next to the composer toggle that opens this Session\'s panel.'),
+  globalTools: z.array(z.string()).default([]).volatile().description('Extra tool names every Session keeps while the network is off.'),
+  sessionTools: z.dict(z.array(z.string())).default({}).volatile().description('Extra tool names kept for one Session, keyed by Session id.'),
+})
+
+/** Settings field of each browser surface, keyed by the name the command accepts. */
+const SURFACE_FIELDS = Object.freeze({
+  plugin: 'pluginPage',
+  settings: 'settingsSection',
+  composer: 'composerPanel',
+})
 
 /**
  * The tools the switch leaves visible: every one of them only touches this machine.
@@ -317,7 +344,80 @@ const safely = (read) => {
  * Mount the `/webtoggle` command and the series-restart listener.
  * @param ctx - the plugin context.
  */
-export function apply(ctx) {
+export function apply(ctx, config) {
+  /**
+   * Read one configuration field. A build that mounted us without the schema
+   * (an old profile row, a test harness) falls back to the documented default,
+   * so the switch keeps working instead of throwing on every command.
+   * @param name - the Config field.
+   * @param fallback - the value to use when the field is absent.
+   * @returns the live value.
+   */
+  function conf(name, fallback) {
+    const ref = config === null || config === undefined ? undefined : config[name]
+    if (ref === undefined || ref === null) return fallback
+    return typeof ref.get === 'function' ? ref.get() : ref
+  }
+
+  /** One list-of-tool-names field, copied into a fresh array of non-empty strings. */
+  function confTools(name) {
+    const value = conf(name, [])
+    if (!Array.isArray(value)) return []
+    return value.filter((entry) => typeof entry === 'string' && entry !== '')
+  }
+
+  /** The extra tool names configured for one Session. */
+  function sessionToolsOf(sessionId) {
+    if (sessionId === undefined) return []
+    const map = conf('sessionTools', {})
+    if (map === null || typeof map !== 'object') return []
+    const list = map[sessionId]
+    if (!Array.isArray(list)) return []
+    return list.filter((entry) => typeof entry === 'string' && entry !== '')
+  }
+
+  /** The three surface switches, as the browser half reads them. */
+  function surfacesOf() {
+    return {
+      plugin: conf('pluginPage', true) === true,
+      settings: conf('settingsSection', true) === true,
+      composer: conf('composerPanel', true) === true,
+    }
+  }
+
+  /** Whether this profile can persist a configuration edit right now. */
+  function canSave() {
+    const editor = safely(() => ctx.get('configEditor'))
+    if (editor === undefined || typeof editor.edit !== 'function') return false
+    return safely(() => ctx.fiber.entry) !== undefined
+  }
+
+  /** Serialized configuration writes, so two clicks never interleave. */
+  let saves = Promise.resolve()
+
+  /**
+   * Persist one configuration change through the profile's config editor. The
+   * updater receives the row's current plain values and returns the next ones;
+   * volatile fields make the running instance adopt them without a restart.
+   * @param update - `(current) => next` for the whole row config.
+   * @returns `{ saved: true }`, or `{ saved: false, reason }` to be reported.
+   */
+  async function saveConfig(update) {
+    const entry = safely(() => ctx.fiber.entry)
+    const editor = safely(() => ctx.get('configEditor'))
+    if (entry === undefined) return { saved: false, reason: 'no-entry' }
+    if (editor === undefined || typeof editor.edit !== 'function') return { saved: false, reason: 'no-editor' }
+    const run = saves.then(() => editor.edit(entry, (current) => update(current ?? {})))
+    // Keep the chain alive after a rejected write: the caller reports it.
+    saves = run.catch(() => {})
+    try {
+      await run
+      return { saved: true }
+    } catch (error) {
+      return { saved: false, reason: messageOf(error) }
+    }
+  }
+
   /**
    * Sessions that are switched off: `sessionId -> { agent, dispose, disposeGuard }`.
    * A row that exists for THIS agent means "off"; the disposers are the only things
@@ -411,6 +511,33 @@ export function apply(ctx) {
   }
 
   /**
+   * The machine-readable state every result carries, so the browser half never has
+   * to guess what the Host decided: the switch, the three surfaces, and both lists.
+   * @param agent - the Agent the command ran for (may be absent for global edits).
+   */
+  function stateOf(agent) {
+    const sessionId = agent?.session?.id
+    return {
+      off: agent?.session?.id === undefined ? false : isOff(agent),
+      surfaces: surfacesOf(),
+      global: confTools('globalTools'),
+      session: sessionToolsOf(sessionId),
+      writable: canSave(),
+    }
+  }
+
+  /**
+   * Build one command result: the human sentence, the state marker, and the JSON state.
+   * @param agent - the Agent the command ran for.
+   * @param kind - `success` or `error`.
+   * @param text - the sentence the UI renders.
+   */
+  function result(agent, kind, text) {
+    const off = agent?.session?.id === undefined ? false : isOff(agent)
+    return { kind, text: `${text} ${markerOf(off)} [web-state]${JSON.stringify(stateOf(agent))}` }
+  }
+
+  /**
    * Build the command result for one state.
    * @param agent - the Agent whose state is reported.
    * @param changed - whether this call changed the state.
@@ -418,22 +545,41 @@ export function apply(ctx) {
    */
   function report(agent, changed) {
     const off = isOff(agent)
-    const marker = markerOf(off)
     if (off) {
-      return {
-        kind: 'success',
-        text: changed
-          ? `已断网：从下一次请求起，本会话只剩本地工具（shell 保留，但联网类命令会被拦下），网页搜索、浏览器、MCP、生图/视频、子代理全部隐藏。 ${marker} / Network off for this session: local work only, and shell commands that would fetch anything are refused.`
-          : `本会话本来就是断网状态，没有重复加限制。 ${marker} / The network was already off for this session.`,
-      }
+      return result(
+        agent,
+        'success',
+        changed
+          ? '已断网：从下一次请求起，本会话只剩本地工具（shell 保留，但联网类命令会被拦下），网页搜索、浏览器、MCP、生图/视频、子代理全部隐藏。 / Network off for this session: local work only, and shell commands that would fetch anything are refused.'
+          : '本会话本来就是断网状态，没有重复加限制。 / The network was already off for this session.',
+      )
     }
-    return {
-      kind: 'success',
-      text: changed
-        ? `已恢复联网：完整工具列表回到本会话。 ${marker} / Network restored for this session.`
-        : `本会话本来就是联网状态，没有改动。 ${marker} / The network was already on for this session.`,
-    }
+    return result(
+      agent,
+      'success',
+      changed
+        ? '已恢复联网：完整工具列表回到本会话。 / Network restored for this session.'
+        : '本会话本来就是联网状态，没有改动。 / The network was already on for this session.',
+    )
   }
+
+  /**
+   * The tool names this Session keeps while the network is off: the built-in local
+   * names, the dual-use shell, plus whatever the configuration adds for everyone or
+   * for this Session. Names the catalog does not know are dropped — `restrict()`
+   * throws on an unknown name instead of narrowing.
+   * @param agent - the Agent whose allowlist is composed.
+   * @returns the allowlist to hand to `tools.restrict()`.
+   */
+  function sessionAllow(agent) {
+    const sessionId = agent?.session?.id
+    const wanted = [...LOCAL_TOOLS, ...GUARDED_TOOLS, ...confTools('globalTools'), ...sessionToolsOf(sessionId)]
+    const unique = wanted.filter((name, index) => wanted.indexOf(name) === index)
+    const known = safely(() => ctx.tools.view().restrictableNames)
+    if (known === undefined) return []
+    return unique.filter((name) => known.has(name))
+  }
+
 
   /**
    * Hide every network-capable tool for one Agent and arm the request-series rebuild.
@@ -445,13 +591,13 @@ export function apply(ctx) {
     // The allowlist must only name tools this deployment actually registers: a name
     // that is not in the catalog would make `restrict()` throw instead of narrowing.
     // Read once per toggle — this is the only catalog-sized work the plugin ever does.
-    const known = safely(() => ctx.tools.view().restrictableNames)
-    const allow = known === undefined ? [] : [...LOCAL_TOOLS, ...GUARDED_TOOLS].filter((name) => known.has(name))
+    const allow = sessionAllow(agent)
     if (allow.length === 0) {
-      return {
-        kind: 'error',
-        text: '无法断网：本部署没有注册任何可保留的本地工具 / Could not switch off: none of the local tools are registered here.',
-      }
+      return result(
+        agent,
+        'error',
+        '无法断网：本部署没有注册任何可保留的本地工具 / Could not switch off: none of the local tools are registered here.',
+      )
     }
     // Arm BEFORE the restriction lands: if the restriction is resolvable while the
     // mark is missing, a request could describe the old catalog.
@@ -467,10 +613,7 @@ export function apply(ctx) {
     } catch (error) {
       pendingSeries.delete(sessionId)
       if (dispose !== undefined) safely(() => dispose())
-      return {
-        kind: 'error',
-        text: `无法断网 / Could not turn the network off: ${messageOf(error)}`,
-      }
+      return result(agent, 'error', `无法断网 / Could not turn the network off: ${messageOf(error)}`)
     }
     offSessions.set(sessionId, { agent, dispose, disposeGuard })
     return report(agent, true)
@@ -501,31 +644,200 @@ export function apply(ctx) {
       if (row.disposeGuard !== undefined) row.disposeGuard()
     } catch (error) {
       // The layer may already be torn down; the state is on either way, but say so.
-      return {
-        kind: 'error',
-        text: `已取消记录，但撤销限制时报告错误 / Recorded as on, but lifting the restriction reported: ${messageOf(error)}`,
-      }
+      return result(
+        agent,
+        'error',
+        `已取消记录，但撤销限制时报告错误 / Recorded as on, but lifting the restriction reported: ${messageOf(error)}`,
+      )
     }
     pendingSeries.add(sessionId)
     return report(agent, true)
   }
 
   /**
-   * Switch this Session's web tools on or off.
+   * Re-apply the allowlist to every Session that is currently off, so an edit takes
+   * effect at once instead of waiting for the next on/off. A Session with an open turn
+   * is skipped: its current request already declared a catalog, and splitting one turn
+   * between two catalogs is exactly what the switch refuses to do.
+   * @returns how many Sessions adopted the new list, and how many were skipped.
+   */
+  function retune() {
+    let applied = 0
+    let skipped = 0
+    for (const [sessionId, row] of [...offSessions]) {
+      if (turnIsOpen(row.agent)) {
+        skipped += 1
+        continue
+      }
+      const allow = sessionAllow(row.agent)
+      if (allow.length === 0) {
+        skipped += 1
+        continue
+      }
+      // Arm first, then swap layers: the new restriction lands before the old one is
+      // lifted, so the catalog never widens in between.
+      pendingSeries.add(sessionId)
+      let dispose
+      let disposeGuard
+      try {
+        dispose = row.agent.ctx.tools.restrict({ allow })
+        disposeGuard = row.agent.ctx.tools.guard(networkGuard)
+      } catch (error) {
+        if (dispose !== undefined) safely(() => dispose())
+        skipped += 1
+        continue
+      }
+      offSessions.set(sessionId, { agent: row.agent, dispose, disposeGuard })
+      safely(() => row.dispose())
+      safely(() => row.disposeGuard?.())
+      applied += 1
+    }
+    return { applied, skipped }
+  }
+
+  /** Parse `on`/`off` (and their obvious aliases); anything else is a usage error. */
+  function parseSwitch(token) {
+    const value = typeof token === 'string' ? token.trim().toLowerCase() : ''
+    if (value === 'on' || value === 'true' || value === '1' || value === 'show' || value === 'yes') return true
+    if (value === 'off' || value === 'false' || value === '0' || value === 'hide' || value === 'no') return false
+    return undefined
+  }
+
+  /** The list one `allow` form edits, and how to write it back. */
+  function allowEditor(global, sessionId) {
+    if (global) {
+      return {
+        read: (current) => (Array.isArray(current.globalTools) ? current.globalTools : []),
+        write: (current, list) => ({ ...current, globalTools: list }),
+      }
+    }
+    return {
+      read: (current) => {
+        const map = current.sessionTools
+        const list = map !== null && typeof map === 'object' ? map[sessionId] : undefined
+        return Array.isArray(list) ? list : []
+      },
+      write: (current, list) => {
+        const map = current.sessionTools !== null && typeof current.sessionTools === 'object' ? { ...current.sessionTools } : {}
+        if (list.length === 0) delete map[sessionId]
+        else map[sessionId] = list
+        return { ...current, sessionTools: map }
+      },
+    }
+  }
+
+  /** One sentence describing the lists and the surface switches. */
+  function describeConfig(agent) {
+    const surfaces = surfacesOf()
+    const global = confTools('globalTools')
+    const session = sessionToolsOf(agent?.session?.id)
+    const flags = `pluginPage=${surfaces.plugin ? 'on' : 'off'} settingsSection=${surfaces.settings ? 'on' : 'off'} composerPanel=${surfaces.composer ? 'on' : 'off'}`
+    const globalText = global.length === 0 ? '（空 / none）' : global.join(', ')
+    const sessionText = session.length === 0 ? '（空 / none）' : session.join(', ')
+    const writable = canSave() ? '' : '（本 profile 不能写配置，改动只在本次运行生效 / this profile cannot save, changes last until restart）'
+    return `${flags}；全局保留 / global keep: ${globalText}；本会话保留 / this Session keep: ${sessionText}。${writable}`
+  }
+
+  /**
+   * Read or write the plugin's own settings: the three browser surfaces, the global
+   * keep-list, and this Session's keep-list.
+   * @param agent - the Agent the command ran for (its Session owns the per-Session list).
+   * @param verb - `config`, `surface`, or `allow`.
+   * @param args - the remaining tokens.
+   * @returns the command result the UI renders.
+   */
+  async function configure(agent, verb, args) {
+    if (verb === 'config') return result(agent, 'success', describeConfig(agent))
+    if (verb === 'surface') {
+      const key = (args[0] ?? '').toLowerCase()
+      const field = SURFACE_FIELDS[key]
+      if (field === undefined) {
+        return result(agent, 'error', `未知的显示位置 / unknown surface "${args[0] ?? ''}"; use plugin|settings|composer`)
+      }
+      const value = parseSwitch(args[1])
+      if (value === undefined) return result(agent, 'error', `用法 / usage: /${COMMAND} surface ${key} on|off`)
+      const saved = await saveConfig((current) => ({ ...current, [field]: value }))
+      if (!saved.saved) {
+        return result(
+          agent,
+          'error',
+          `没能保存显示设置 / Could not save the surface setting: ${saved.reason === 'no-editor' || saved.reason === 'no-entry' ? '这个 profile 没有配置文件可写 / this profile has no writable configuration' : saved.reason}`,
+        )
+      }
+      return result(agent, 'success', `已把 ${key} 配置面板设为${value ? '显示' : '隐藏'} / ${key} panel is now ${value ? 'shown' : 'hidden'}. ${describeConfig(agent)}`)
+    }
+    // verb === 'allow'
+    const action = (args[0] ?? '').toLowerCase()
+    const global = args.includes('--global')
+    const names = args.slice(1).filter((token) => token !== '--global')
+    if (action === 'list' || action === '') return result(agent, 'success', describeConfig(agent))
+    if (action === 'clear') {
+      const editor = allowEditor(global, agent.session.id)
+      const saved = await saveConfig((current) => editor.write(current, []))
+      if (!saved.saved) return result(agent, 'error', `没能保存白名单 / Could not save the allowlist: ${saved.reason}`)
+      const tuned = retune()
+      return result(
+        agent,
+        'success',
+        `已清空${global ? '全局' : '本会话'}保留名单 / Cleared the ${global ? 'global' : 'Session'} keep-list. 生效 ${tuned.applied}${tuned.skipped === 0 ? '' : `，跳过 ${tuned.skipped}（正在执行）`}`,
+      )
+    }
+    const removing = action === 'remove' || action === 'rm' || action === 'delete' || action === '-' || action === 'del'
+    if (!removing && action !== 'add' && action !== '+') {
+      return result(agent, 'error', `用法 / usage: /${COMMAND} allow add|remove <tool> [--global] | allow clear [--global] | allow list`)
+    }
+    const name = (names[0] ?? '').trim()
+    if (name === '') {
+      return result(agent, 'error', `用法 / usage: /${COMMAND} allow ${removing ? 'remove' : 'add'} <tool> [--global]`)
+    }
+    // A name the catalog does not know is almost always a typo; saying so beats a
+    // keep-list entry that silently does nothing.
+    const known = safely(() => ctx.tools.view().knownNames)
+    if (!removing && known !== undefined && !known.has(name)) {
+      return result(agent, 'error', `没有名为 ${name} 的工具 / no registered tool is named "${name}"`)
+    }
+    const editor = allowEditor(global, agent.session.id)
+    const saved = await saveConfig((current) => {
+      const list = editor.read(current)
+      const next = removing ? list.filter((entry) => entry !== name) : list.includes(name) ? list : [...list, name]
+      return editor.write(current, next)
+    })
+    if (!saved.saved) return result(agent, 'error', `没能保存白名单 / Could not save the allowlist: ${saved.reason}`)
+    const tuned = retune()
+    const scope = global ? '全局 / global' : '本会话 / this Session'
+    const note = removing
+      ? `已从${scope}保留名单移除 ${name} / Removed "${name}" from the ${global ? 'global' : 'Session'} keep-list.`
+      : `已把 ${name} 加入${scope}保留名单：断网时它也保留 / Added "${name}" to the ${global ? 'global' : 'Session'} keep-list; it stays available while the network is off.`
+    const tunedText = tuned.applied === 0 && tuned.skipped === 0 ? '' : ` 已刷新 ${tuned.applied}${tuned.skipped === 0 ? '' : `，跳过 ${tuned.skipped}（正在执行）`}`
+    return result(agent, 'success', `${note}${tunedText} ${describeConfig(agent)}`)
+  }
+
+  /**
+   * Switch this Session's web tools on or off, or configure the switch.
    * @param agent - the receiving Agent (the Session whose switch is being changed).
-   * @param rawInput - `on`, `off`, `status`, or empty to toggle.
+   * @param rawInput - `on`, `off`, `status`, `surface …`, `allow …`, `config`, or empty to toggle.
    * @returns the command result the UI renders.
    */
   function toggle(agent, rawInput) {
+    const text = typeof rawInput === 'string' ? rawInput.trim() : ''
+    const [head = '', ...args] = text === '' ? [] : text.split(/\s+/)
+    const requested = head.toLowerCase()
+    // The configuration forms need no Agent state, but the Session still scopes the
+    // per-Session list; only the plain switch needs a Session at all.
+    if (requested === 'config' || requested === 'surface' || requested === 'allow') {
+      if (agent?.session?.id === undefined) {
+        return { kind: 'error', text: '没有可配置的会话 / No Session to configure.' }
+      }
+      return configure(agent, requested, args)
+    }
     if (agent?.session?.id === undefined) {
       return { kind: 'error', text: '没有可切换的会话 / No Session to switch.' }
     }
-    const requested = typeof rawInput === 'string' ? (rawInput.trim().toLowerCase().split(/\s+/)[0] ?? '') : ''
     if (requested === 'status') return report(agent, false)
     if (requested !== '' && requested !== 'on' && requested !== 'off') {
       return {
         kind: 'error',
-        text: `用法 / usage: /${COMMAND} [on|off|status]（不带参数则切换 / no argument toggles）`,
+        text: `用法 / usage: /${COMMAND} [on|off|status|config] | /${COMMAND} surface <plugin|settings|composer> on|off | /${COMMAND} allow add|remove <tool> [--global] | /${COMMAND} allow clear [--global]`,
       }
     }
     const current = isOff(agent)
@@ -537,18 +849,19 @@ export function apply(ctx) {
     // mid-turn would either be ignored or split one request from its declarations, so
     // this switch queues nothing and refuses instead.
     if (turnIsOpen(agent)) {
-      return {
-        kind: 'error',
-        text: '当前任务正在执行，等这一轮结束后再切换联网开关 / This task is running; switch the web tools after the turn ends.',
-      }
+      return result(
+        agent,
+        'error',
+        '当前任务正在执行，等这一轮结束后再切换联网开关 / This task is running; switch the web tools after the turn ends.',
+      )
     }
     return next ? switchOff(agent) : switchOn(agent)
   }
 
   ctx.commands.register({
     name: COMMAND,
-    description: 'Turn the web tools (web_search / web_fetch) on or off for this Session.',
-    input: { hint: 'on|off|status' },
+    description: 'Punch the network switch for this Session, or configure which panels show and which tools stay.',
+    input: { hint: 'on|off|status|config|surface <plugin|settings|composer> on|off|allow add|remove <tool> [--global]' },
     handler: ({ agent, rawInput }) => toggle(agent, rawInput),
   })
 }

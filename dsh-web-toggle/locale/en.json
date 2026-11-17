@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Network switch",
-    "description": "Adds a per-task switch to the composer toolbar: turn it off and this task keeps only local tools, so web search, the browser, MCP servers and the shell can no longer reach the network; turn it on to restore them. Other tasks are unaffected.",
+    "description": "A per-task network switch: turn it off and this task no longer sees web search, the browser, MCP servers, subagents or any other internet-facing tool, and shell commands that would fetch anything are refused; turn it on to restore them. Ships three configuration surfaces (a caret beside the composer toggle, a settings section, and this plugin's detail page) with per-task keep-lists.",
     "detail": "docs/DETAIL.md"
   }
 }

@@ -5,6 +5,7 @@
 - 亮着：本会话工具齐全（`web_search` / `web_fetch`、shell、浏览器、MCP 都在）。
 - 点灭：本会话**只剩不能出网的工具**——网页搜索、浏览器、MCP、生图/视频、子代理、插件管理、定时任务全部从工具列表里消失，`ops_bash` 保留但加命令过滤。下一次请求生效。
 - 再点一次恢复。**只影响这一个会话**，别的会话和本地功能照旧。
+- 旁边的**小箭头**打开本会话面板：开关、本会话额外保留的工具都在里面；设置页与插件详情页还有一份全局面板（三处都能在配置里关掉）。
 
 底层用的是 DSH 内核自带的 `agent.ctx.tools.restrict()`：作用域绑定在 agent 上，返回精确的 disposer，所以隔离是天然的、按会话的、可逆的。用的是**白名单**而不是只 deny 两个名字：只 deny `web_search` / `web_fetch` 挡不住 shell、浏览器、MCP 这些通用通道；白名单才能默认关门——将来别的插件新加的工具也一样被挡在外面，直到有人把它加进白名单。
 
@@ -18,7 +19,7 @@
 plugin_manager install_bundle target="dsh-web-toggle"
 ```
 
-或指定版本 `target="dsh-web-toggle@0.1.1"`。也可以下 GitHub Release 里的 tgz，用 `target="file:/绝对路径/dsh-web-toggle-0.1.1.tgz"` 装，效果一样。
+或指定版本 `target="dsh-web-toggle@0.2.0"`。也可以下 GitHub Release 里的 tgz，用 `target="file:/绝对路径/dsh-web-toggle-0.2.0.tgz"` 装，效果一样。
 
 开发时源码目录直接装（改代码后要同步）：
 
@@ -36,9 +37,39 @@ pnpm 对 `file:` 依赖做的是**拷贝**，不是软链：改完源码要 `nod
 | --- | --- |
 | `/webtoggle` | 切换 |
 | `/webtoggle on` / `off` | 显式开关（幂等） |
-| `/webtoggle status` | 只读状态 |
+| `/webtoggle status` | 只读状态（含面板配置与两份白名单） |
+| `/webtoggle config` | 看配置：三个入口的显示状态、全局与本会话保留的工具 |
+| `/webtoggle surface <plugin\|settings\|composer> on\|off` | 开关某处面板 |
+| `/webtoggle allow add <tool> [--global]` | 加一个断网时仍然保留的工具（默认本会话） |
+| `/webtoggle allow remove <tool> [--global]` | 去掉一个 |
+| `/webtoggle allow list [--global]` | 列出 |
+| `/webtoggle allow clear [--global]` | 清空 |
 
 轮次正在执行时切换会被**拒绝**（不排队）：同一轮里前后两个请求的工具声明不一致会让模型困惑。
+
+## 三处面板
+
+刷新后能见到三个入口，每个都能单独关掉（关掉只是不画界面，开关本身照常工作）：
+
+| 位置 | 管什么 |
+| --- | --- |
+| 输入框小地球右边的小箭头 | 本会话开关 + **本会话**额外保留的工具 |
+| 设置 → 侧边栏「联网开关」 | 三个入口的显示开关 + **所有会话**额外保留的工具 |
+| 插件管理 → 本插件详情页 | 与设置页同内容，省得从插件页跳走 |
+
+配置就写在 profile 的 `cordis.yml` 里本插件那一行，界面改动**即时生效**（字段是 volatile 的，不会重启插件）：
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `pluginPage` | `true` | 插件详情页里的面板 |
+| `settingsSection` | `true` | 设置页侧边栏里的面板 |
+| `composerPanel` | `true` | 输入框开关旁的小箭头 |
+| `globalTools` | `[]` | 所有会话断网时额外保留的工具名 |
+| `sessionTools` | `{}` | 按会话 id 的额外保留名单 |
+
+断网时保留的工具 = 内置本地白名单 ∪ `ops_bash` ∪ `globalTools` ∪ `sessionTools[会话]`，再和内核当前注册的工具求交（没装的名字自动忽略，不会因此报错）。拼写不确定就先 `allow add` 试一下：不存在的名字会被明确拒绝，不会静默写进配置。
+
+顺带说明：这些面板拿不到「当前会话」（设置页的 owner props 只有 `close`），所以它们执行命令时用**最后一个在页面上画过的会话**，其次用 localStorage 记下的会话 id，再其次取客户端已知的第一个会话。开过一次任务之后就不会缺会话。
 
 ## 它挡什么
 

@@ -13,8 +13,12 @@
 | `/webtoggle off` | 关（幂等：重复关不会叠加限制） |
 | `/webtoggle on` | 开 |
 | `/webtoggle status` | 只看当前状态，不改 |
+| `/webtoggle config` | 看面板配置与两份保留名单 |
+| `/webtoggle surface <plugin\|settings\|composer> on\|off` | 开关某处面板 |
+| `/webtoggle allow add\|remove <tool> [--global]` | 增删保留工具（默认本会话） |
+| `/webtoggle allow list\|clear [--global]` | 列出 / 清空 |
 
-命令结果末尾带一个机器可读标记（`[web:on]` / `[web:off]`），按钮用它同步真实状态。
+命令结果末尾带一个机器可读标记（`[web:on]` / `[web:off]`），按钮用它同步真实状态；后面还跟一段 `[web-state]{...}`，面板用它画配置（开关状态、三个入口、两份白名单、配置是否可写）。
 
 ## 行为
 
@@ -25,6 +29,23 @@
 - 恢复时调用当时存下的那个 disposer，遮罩被精确撤销，工具列表原样回来。
 - 状态按**会话**记录，互不影响：关掉 A 会话不会影响 B 会话，也不影响其他会话的本地工作。
 - 工具列表变了会重建请求序列（`agent/pre-step` → `startsRequestSeries`），避免新声明被上游当成「延迟追加」。
+
+## 三处面板与按会话白名单
+
+三个入口都注册在客户端槽位上，都读同一个状态、走同一条命令线：
+
+| 槽位 | id | 作用 |
+| --- | --- | --- |
+| `conversation.input.left` | `web-toggle` | 输入框的开关；旁边小箭头是本会话面板 |
+| `settings.section` | `web-toggle` | 设置页侧边栏的全局面板 |
+| `plugins.detail.section` | `web-toggle` | 插件详情页的全局面板（只认本包） |
+
+- 三个槽位**总是**注册，配置里关掉时组件直接 `return null`：这样改配置不需要重注册槽位，也不会在导航里留下空条目。
+- 设置页与详情页拿不到 sessionId（owner props 只有 `close` / `subject`），所以它们执行命令时用「最后一个画过的会话」：模块级 `lastSessionId` → localStorage `dsh-web-toggle:last-session` → 客户端已知的第一个会话。命中不了就如实提示「先打开任意一个任务」。
+- 配置写入只走 `configEditor.edit(entry, current => …)`：拿不到编辑器时**如实报错**（`没有配置文件可写`、`writable: false`），绝不假装保存。
+- 五个配置字段都是 `.volatile()`：改值原地生效，不重启插件。写入用 `saves` promise 串行化，避免两次点击互相覆盖。
+- 白名单 = `LOCAL_TOOLS ∪ GUARDED_TOOLS ∪ globalTools ∪ sessionTools[sessionId]`，与 `tools.view().restrictableNames` 求交后交给 `restrict({ allow })`。`allow add` 先用 `knownNames` 校验：不存在的名字直接拒绝。
+- 已经在断网状态时改白名单（`retune()`）：先按新名单建好新的 restrict + guard，再撤销旧的，中间不会出现「变宽」的空档；正在执行的轮次跳过并在回执里写 `跳过 N（正在执行）`，等下一轮切开关时自然带上新名单。
 
 ## 性能
 
@@ -44,8 +65,8 @@
 
 ## 相关实现
 
-- `index.js`：`/webtoggle` 命令、`tools.restrict()` 遮罩与 disposer 管理、请求序列重建、会话销毁清理。
-- `client.js`：`conversation.input.left` 槽位组件、按会话铭记的显示状态、`commands.execute` 调用。
+- `index.js`：`/webtoggle` 命令（含 `config` / `surface` / `allow`）、`Config` 五个 volatile 字段、`tools.restrict()` 遮罩与 `tools.guard()` 命令过滤的 disposer 管理、`retune()` 换名单、请求序列重建、会话销毁清理。
+- `client.js`：三个槽位组件（输入框开关 + 小箭头浮层、设置页、插件详情页）、共用面板 `PanelView`、按会话铭记的显示状态、`commands.execute` 调用。
 
 ## 拒绝文案为什么写成指令
 

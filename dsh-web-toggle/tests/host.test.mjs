@@ -70,6 +70,7 @@ const CATALOG = new Set([
 function makeCtx() {
   const commands = new Map()
   const listeners = new Map()
+  const services = new Map()
   const ctx = {
     commands: {
       register(definition) {
@@ -82,14 +83,19 @@ function makeCtx() {
     tools: {
       // 本部署的工具目录：既含本地工具，也含各种能出网的工具；'read' 是未列入白名单的
       // 本地工具，'acp_cache' 故意不注册，用来验证"只保留目录里真实存在的名字"。
-      view: () => ({ restrictableNames: CATALOG }),
+      view: () => ({ restrictableNames: CATALOG, knownNames: CATALOG }),
     },
+    // 配置相关：真实运行时由 profile 的 config editor 提供，测试里可按需塞入。
+    get(name) {
+      return services.get(name)
+    },
+    fiber: { entry: { options: { id: 'web-toggle' } } },
     on(event, listener) {
       listeners.set(event, listener)
       return () => listeners.delete(event)
     },
   }
-  return { ctx, commands, listeners }
+  return { ctx, commands, listeners, services }
 }
 
 /** 造一个 agent：tools.restrict 记录调用并返回一个可观察的 disposer。 */
@@ -390,6 +396,144 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
   assert.equal(typeof bash(`python -c "import asyncio;asyncio.open_connection('h',80)"`), 'string', 'asyncio.open_connection 仍要拦')
 
   console.log('12 shell 命令过滤 ok')
+}
+
+/** 从结果文本里取回机器可读状态；没有就说明半侧没按约定上报。 */
+const stateOf = (text) => {
+  const matched = /\[web-state\](\{.*\})\s*$/.exec(text)
+  assert.ok(matched !== null, `结果要带 [web-state]：${text}`)
+  return JSON.parse(matched[1])
+}
+
+/** 造一个带配置编辑器与 volatile 配置引用的 ctx（模拟运行时）。 */
+function makeConfigCtx(initial = {}) {
+  const { ctx, commands, listeners } = makeCtx()
+  const values = {
+    pluginPage: true,
+    settingsSection: true,
+    composerPanel: true,
+    globalTools: [],
+    sessionTools: {},
+    ...initial,
+  }
+  const writes = []
+  ctx.get = (name) => (name === 'configEditor' ? {
+    async edit(entry, update) {
+      assert.equal(entry.options.id, 'web-toggle', '只编辑本插件自己的 profile 行')
+      const next = update({
+        ...values,
+        globalTools: [...values.globalTools],
+        sessionTools: { ...values.sessionTools },
+      })
+      writes.push(next)
+      Object.assign(values, next)
+      return next
+    },
+  } : undefined)
+  const config = Object.fromEntries(Object.keys(values).map((key) => [key, { get: () => values[key] }]))
+  return { ctx, commands, listeners, values, writes, config }
+}
+
+// 13. 配置面：三个显示位置 + 白名单（本会话 / 全局）+ 状态上报
+{
+  const { ctx: configCtx, commands: configCommands, values, writes, config } = makeConfigCtx()
+  apply(configCtx, config)
+  const run = configCommands.get('webtoggle').handler
+  const call2 = (agent, rawInput) => run({ agent, rawInput })
+  const { agent } = makeAgent('c1')
+
+  const initial = await call2(agent, 'status')
+  assert.equal(stateOf(initial.text).surfaces.plugin, true, '默认三个入口都显示')
+  assert.equal(stateOf(initial.text).writable, true, '有编辑器时可写')
+
+  // 三个显示位置
+  const hidden = await call2(agent, 'surface settings off')
+  assert.equal(hidden.kind, 'success')
+  assert.equal(values.settingsSection, false, 'surface settings off 要落到配置')
+  assert.equal(stateOf(hidden.text).surfaces.settings, false, '结果要回报新状态')
+  assert.equal(writes.length, 1, '一次点击只写一次配置')
+  await call2(agent, 'surface plugin off')
+  await call2(agent, 'surface composer off')
+  assert.deepEqual(
+    [values.pluginPage, values.settingsSection, values.composerPanel],
+    [false, false, false],
+    '三个入口都能单独关闭',
+  )
+  await call2(agent, 'surface composer on')
+  assert.equal(values.composerPanel, true, '也能再打开')
+  assert.equal((await call2(agent, 'surface nope on')).kind, 'error', '未知入口要报错')
+  assert.equal((await call2(agent, 'surface plugin')).kind, 'error', '缺 on/off 要报用法')
+
+  // 本会话白名单
+  const added = await call2(agent, 'allow add read')
+  assert.equal(added.kind, 'success', `加白名单应成功：${added.text}`)
+  assert.deepEqual(values.sessionTools.c1, ['read'], '默认加到本会话')
+  assert.deepEqual(stateOf(added.text).session, ['read'], '状态里要出现本会话白名单')
+  await call2(agent, 'allow add read')
+  assert.deepEqual(values.sessionTools.c1, ['read'], '重复添加不该出现两条')
+  assert.equal((await call2(agent, 'allow add nope')).kind, 'error', '目录里没有的工具要拒绝（防手误）')
+
+  // 全局白名单
+  const global = await call2(agent, 'allow add write --global')
+  assert.equal(global.kind, 'success', `全局加白应成功：${global.text}`)
+  assert.deepEqual(values.globalTools, ['write'], '--global 落到全局')
+  assert.deepEqual(stateOf(global.text).global, ['write'])
+  assert.deepEqual(values.sessionTools.c1, ['read'], '全局改动不该污染本会话')
+
+  // 移除与清空
+  await call2(agent, 'allow remove read')
+  assert.equal(values.sessionTools.c1, undefined, '移除最后一个后整条会话记录消失')
+  await call2(agent, 'allow clear --global')
+  assert.deepEqual(values.globalTools, [], '清空全局')
+
+  const described = await call2(agent, 'config')
+  assert.match(described.text, /pluginPage=/, 'config 要能读出当前开关')
+
+  // 配置缺失（没有 configEditor）时要明说，不能假装保存成功
+  const { ctx: bareCtx, commands: bareCommands } = makeCtx()
+  const bareValues = { pluginPage: true, settingsSection: true, composerPanel: true, globalTools: [], sessionTools: {} }
+  const bareConfig = Object.fromEntries(Object.keys(bareValues).map((key) => [key, { get: () => bareValues[key] }]))
+  apply(bareCtx, bareConfig)
+  const bare = (agentRef, rawInput) => bareCommands.get('webtoggle').handler({ agent: agentRef, rawInput })
+  const refused = await bare(agent, 'surface plugin off')
+  assert.equal(refused.kind, 'error', '没有编辑器时不能报成功')
+  assert.match(refused.text, /没有配置文件可写/, '要说清是 profile 不可写')
+  assert.equal(stateOf(refused.text).writable, false, '状态要如实报告不可写')
+  console.log('13 配置面（显示位置 / 白名单 / 无编辑器） ok')
+}
+
+// 14. 白名单改动要立刻作用到已经断网的会话；正在执行的会话跳过
+{
+  const { ctx: configCtx, commands: configCommands, values, config } = makeConfigCtx()
+  apply(configCtx, config)
+  const run = configCommands.get('webtoggle').handler
+  const call2 = (agentRef, rawInput) => run({ agent: agentRef, rawInput })
+  const { agent, restrictions, disposals } = makeAgent('c2')
+
+  await call2(agent, 'off')
+  assert.equal(restrictions.length, 1)
+  assert.ok(restrictions[0].allow.includes('ops_bash'), 'shell 保留')
+  assert.ok(!restrictions[0].allow.includes('read'), '未加白的本地工具默认隐藏')
+
+  await call2(agent, 'allow add read')
+  assert.equal(restrictions.length, 2, '加白后要重新下发一次白名单')
+  assert.ok(restrictions[1].allow.includes('read'), '新白名单要包含刚加的工具')
+  assert.ok(disposals.includes('lifted'), '旧限制要撤销，避免层层叠加')
+
+  // 正在执行时不能改动这一轮的工具表：只存配置，跳过下发
+  agent.status = 'running'
+  const skipped = await call2(agent, 'allow add write')
+  assert.equal(restrictions.length, 2, '执行中不重新下发')
+  assert.deepEqual(values.sessionTools.c2, ['read', 'write'], '配置仍要保存')
+  assert.match(skipped.text, /跳过 1/, '要如实说明跳过了几个会话')
+
+  // 下一轮结束后再切换一次，新配置就位
+  agent.status = 'idle'
+  await call2(agent, 'on')
+  await call2(agent, 'off')
+  assert.ok(restrictions.at(-1).allow.includes('write'), '恢复后再断网要带上新工具')
+  await call2(agent, 'on')
+  console.log('14 白名单改动即时生效 / 执行中跳过 ok')
 }
 
 console.log('\n全部通过')
