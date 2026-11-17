@@ -1,8 +1,7 @@
 {
   "name": "dsh-web-toggle",
   "version": "0.1.0",
-  "private": true,
-  "description": "在对话输入框工具栏加一个按会话独立的联网开关：关掉后本会话的模型看不到 web_search / web_fetch，再点一次恢复。",
+  "description": "按会话独立的联网开关：关掉后本会话的模型看不到 web_search / web_fetch、浏览器、MCP 等出网工具，shell 里的联网命令也会被拦下。Per-session web switch for DeepSeek Harness.",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -33,8 +32,21 @@
     "plugin"
   ],
   "license": "MIT",
+  "author": "AluminiumRanran",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AluminiumRanran/dsh-web-toggle.git"
+  },
+  "homepage": "https://github.com/AluminiumRanran/dsh-web-toggle#readme",
+  "bugs": {
+    "url": "https://github.com/AluminiumRanran/dsh-web-toggle/issues"
+  },
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "dsh": {
     "bundle": {
