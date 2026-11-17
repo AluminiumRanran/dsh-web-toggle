@@ -337,6 +337,15 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
     assert.equal(bash(command), undefined, `不应拦下：${command}`)
   }
   assert.equal(guard({ name: 'write', arguments: { file_path: 'a' } }), undefined, '别的工具不受这个 guard 影响')
+
+  // 拒绝原因要写成可执行指令，而不是只说"被拦了"
+  const reason = bash('curl https://example.com')
+  assert.ok(reason.includes('一切形式的联网工具'), '要说明本会话禁用一切联网工具')
+  assert.ok(reason.includes('向用户说明'), '要给出出口：请用户暂时打开开关')
+  assert.ok(reason.includes('不要写脚本'), '要明确禁止换通道绕过（写脚本/编码/子进程）')
+  assert.ok(reason.includes('误判'), '要说明误判时的处理方式')
+  const noCommand = guard({ name: 'ops_bash', arguments: {} })
+  assert.ok(noCommand.includes('一切形式的联网工具'), '无命令文本的拒绝也要带同一条规则')
   assert.equal(typeof guard({ name: 'ops_bash', arguments: {} }), 'string', '没有可检查的命令时按保守处理拒绝')
 
   call(agent, 'on')

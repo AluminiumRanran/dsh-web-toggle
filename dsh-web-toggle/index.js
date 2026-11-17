@@ -76,6 +76,22 @@ const LOCAL_TOOLS = [
  * instead of being hidden: `ops_bash` still runs local commands, but a command that
  * looks like network traffic is refused before it starts.
  */
+/**
+ * Every denial ends with this. It is written as an instruction, not a description:
+ * the model must not go looking for another route to the network (a different tool,
+ * a script file, an encoded payload, a child process all count), and when it genuinely
+ * needs the network it should stop and ask the user to flip the switch back on.
+ */
+const OFFLINE_NOTICE =
+  '规则：本会话暂时不允许使用一切形式的联网工具。不要换别的工具、不要写脚本或编码后执行、' +
+  '不要起子进程去找替代通道——开关打开之前这里的任何联网尝试都会被拦下。真的需要联网时，' +
+  '停下来向用户说明「需要联网」，请用户暂时打开开关；如果怀疑是误判，也照此处理。 / ' +
+  'Rule: this task currently allows no networked tools of any kind. Do not reach for another ' +
+  'tool, do not write a script or encode a payload to run, do not spawn a child process looking ' +
+  'for a side channel — every networked attempt is blocked here until the switch is on. If you ' +
+  'genuinely need the network, stop and tell the user you need it, and ask them to turn the ' +
+  'switch back on for a while. Do the same if you suspect a false positive.'
+
 const GUARDED_TOOLS = ['ops_bash']
 
 /** Words that mean "this command wants the network": binaries, schemes, package fetches. */
@@ -151,10 +167,10 @@ export function apply(ctx) {
     const args = exec.arguments
     const command = args !== null && typeof args === 'object' ? args.command : undefined
     if (typeof command !== 'string') {
-      return '本会话已断网：这条工具调用没有可检查的命令文本，为稳妥起见拒绝执行。 / This task is offline: the call carries no inspectable command, so it was refused.'
+      return `本会话已断网：这条工具调用没有可检查的命令文本，为稳妥起见拒绝执行。${OFFLINE_NOTICE}`
     }
     if (!NETWORK_COMMAND.test(command)) return undefined
-    return '本会话已断网：这条命令看起来会联网（下载、远程连接或网络 URL），已被拦下。本地命令照常可以执行；要联网请先点开开关。 / This task is offline: the command looks like network traffic and was blocked; local commands still run. Turn the switch back on to fetch anything.'
+    return `本会话已断网：这条命令看起来会联网（下载、远程连接或网络 URL），已被拦下。本地命令照常可以执行。${OFFLINE_NOTICE}`
   }
 
   /**

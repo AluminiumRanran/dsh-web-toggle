@@ -29,6 +29,8 @@
 
 ## 它挡什么、不挡什么
 
+被拦下的调用会收到一条**写成指令的拒绝理由**（而不是只说"被拦了"）：本会话暂时不允许使用一切形式的联网工具 / 不要换工具、写脚本、编码或起子进程找替代通道 / 真需要就停下请用户打开开关 / 怀疑误判照此处理。
+
 **留下、但加命令过滤**：`ops_bash`。跑本地命令（构建、测试、搬文件）照常；命令里出现 `curl` / `wget` / `ssh` / `git clone` / `npm view|pack|install` / `pip install` / `python` 的 `socket`·`ssl`·`urllib` 导入 / PowerShell 的 `Net.WebClient`·`-EncodedCommand` / `base64 -d | sh` / `http(s)://` / UNC 共享之类，执行前就被 `tools.guard()` 拦下并说明原因。本地命令为：`pnpm run build`、`npm test`、`git status|log|commit`、`python -c "print(1+1)"`、`node scripts/x.mjs` 等。**红队已证明：把脚本先写到文件再执行、或用二进制发包，仍能绕**——这层是提示，不是墙。
 
 **隐藏**：`web_search`、`web_fetch`、浏览器工具（`bsk_*`）、`computer_*`（能驱动浏览器看网页）、全部 `mcp__*` 与 `read_mcp_resource` / `list_mcp_resources`、`video_*`、`workbuddy_*`、`subagent` / `subagent_fork` / `workflow` / `send_message`（子代理是新的 Agent，遮罩不跟过去）、`plugin_manager`（装包=下载）、`schedule_create` / `schedule_edit`（会安排另一个会话去联网）。
