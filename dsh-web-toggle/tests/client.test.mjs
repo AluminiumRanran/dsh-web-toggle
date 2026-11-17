@@ -327,6 +327,14 @@ function expand(node) {
   assert.ok(detail !== undefined, '应注册 plugins.detail.section')
   assert.equal(detail.definition.id, 'web-toggle')
 
+  // 侧边栏图标必须挂在同名 id 上，否则壳会退回它自己的齿轮图标。
+  const icon = state.slots['settings.section.icon']
+  assert.ok(icon !== undefined, '应注册 settings.section.icon')
+  assert.equal(icon.definition.id, 'web-toggle')
+  const glyph = icon.component({ size: 16, active: true })
+  assert.equal(glyph.type, 'span')
+  assert.equal(glyph.props.className, 'dswt-navicon')
+
   assert.ok(t('label') !== 'label', '运行期字典应已注册')
   assert.ok(state.effects.some((label) => String(label).includes('stylesheet')))
   console.log('2 三个槽位与样式注册 ok')

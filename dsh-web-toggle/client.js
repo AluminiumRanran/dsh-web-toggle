@@ -55,6 +55,7 @@ window.__ModuleLoader__.load({
 .dswt-trigger:disabled{cursor:default;opacity:.55}
 .dswt-icon{position:relative;flex:none;display:inline-flex;opacity:.85}
 .dswt-icon svg{width:14px;height:14px}
+.dswt-navicon{display:inline-flex;align-items:center;justify-content:center}
 .dswt-root[data-off="false"] .dswt-icon{color:var(--dsw-alias-state-success-primary)}
 .dswt-root[data-off="true"] .dswt-icon::after{content:"";position:absolute;left:-1px;top:50%;width:16px;height:1.5px;border-radius:1px;background:currentColor;transform:rotate(-45deg);transform-origin:center}
 .dswt-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
@@ -66,8 +67,11 @@ window.__ModuleLoader__.load({
 .dswt-note{display:inline-flex;align-items:center;min-width:0;max-width:220px;margin-left:2px;padding:0 8px;color:var(--dsw-alias-label-secondary);font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dswt-note[data-kind="ok"]{color:var(--dsw-alias-state-success-primary)}
 .dswt-note[data-kind="error"]{color:var(--dsw-alias-state-error-primary)}
-.dswt-panel{position:fixed;z-index:60;width:290px;max-height:70vh;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:12px;border:1px solid var(--dsw-alias-border-neutral,rgba(127,127,127,.25));background:var(--dsw-alias-bg-elevated,#fff);color:var(--dsw-alias-label-primary,#111);font-size:12px;font-weight:400;line-height:1.5;box-shadow:0 10px 30px rgba(0,0,0,.18)}
-.dswt-panel[data-inline="true"]{position:static;width:auto;max-height:none;box-shadow:none;padding:0;border:none;background:0 0;font-size:13px}
+/* The popover sits absolutely inside the tool row, so it follows the composer no matter
+   how the shell transforms it; JS only supplies the offset up to the card's top edge. */
+.dswt-pop{position:absolute;z-index:60;left:0;bottom:calc(100% + 6px)}
+.dswt-panel{width:min(320px,calc(100vw - 24px));max-height:min(60vh,420px);overflow:auto;display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:var(--dsw-radius-lg,12px);border:.5px solid var(--dsw-alias-border-l1,light-dark(rgba(0,0,0,.12),rgba(255,255,255,.16)));background:var(--dsw-specific-menu,light-dark(#fff,#202127));color:var(--dsw-alias-label-primary,light-dark(#1a1a1a,#f2f3f5));font-size:12px;font-weight:400;line-height:1.5;box-shadow:var(--dsw-elevation-prominent,0 12px 32px light-dark(rgba(0,0,0,.16),rgba(0,0,0,.5)));backdrop-filter:var(--dsw-menu-backdrop-filter,none)}
+.dswt-panel[data-inline="true"]{width:auto;max-height:none;overflow:visible;box-shadow:none;padding:0;border:none;background:0 0;backdrop-filter:none;font-size:13px;color:inherit}
 .dswt-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:600;font-size:13px}
 .dswt-section{display:flex;flex-direction:column;gap:6px}
 .dswt-section-title{font-weight:600}
@@ -280,14 +284,35 @@ window.__ModuleLoader__.load({
     }
 
     /** The globe glyph: a round window with two meridians and a latitude line. */
-    const globeGlyph = () =>
+    /** One element's box, or null when the environment cannot measure (tests, SSR). */
+    const measure = (node) =>
+      node !== null && node !== undefined && typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
+
+    /** The composer card around the tool row: the nearest ancestor tall enough to be it. */
+    const cardOf = (element) => {
+      let node = element === null || element === undefined ? null : element.parentElement
+      let depth = 0
+      while (node !== null && node !== undefined && depth < 8) {
+        const rect = measure(node)
+        if (rect !== null && rect.height >= 80 && rect.width >= 200) return node
+        node = node.parentElement
+        depth += 1
+      }
+      return null
+    }
+
+    const globeGlyph = (size = 14) =>
       h(
         'svg',
-        { viewBox: '0 0 16 16', width: 14, height: 14, 'aria-hidden': true, focusable: false },
+        { viewBox: '0 0 16 16', width: size, height: size, 'aria-hidden': true, focusable: false },
         h('circle', { cx: 8, cy: 8, r: 5.9, fill: 'none', stroke: 'currentColor', strokeWidth: 1.4 }),
         h('path', { d: 'M8 2.1c1.9 1.6 1.9 10.2 0 11.8M8 2.1c-1.9 1.6-1.9 10.2 0 11.8', fill: 'none', stroke: 'currentColor', strokeWidth: 1.2 }),
         h('path', { d: 'M2.4 6.2h11.2M2.4 9.8h11.2', fill: 'none', stroke: 'currentColor', strokeWidth: 1.2 }),
       )
+
+    /** The settings-section glyph. The shell falls back to its generic gear otherwise. */
+    const SectionIcon = (props) =>
+      h('span', { className: 'dswt-navicon', 'aria-hidden': true }, globeGlyph(props === undefined || props === null || props.size === undefined ? 16 : props.size))
 
     /** The caret glyph that opens the Session panel. */
     const caretGlyph = () =>
@@ -523,6 +548,7 @@ window.__ModuleLoader__.load({
         const [panelNote, setPanelNote] = useState(null)
         const [panelError, setPanelError] = useState(null)
         const [anchor, setAnchor] = useState(null)
+        const rootRef = useRef(null)
         const caretRef = useRef(null)
         const aliveRef = useRef(true)
         const busyRef = useRef(false)
@@ -560,27 +586,44 @@ window.__ModuleLoader__.load({
           return () => window.clearTimeout(timer)
         }, [note, panelNote])
 
-        // The popover is positioned against the caret in viewport coordinates, so a
-        // scrolling tool row cannot clip it.
+        // The popover is positioned against the composer card, not the viewport: fixed
+        // coordinates break inside transformed ancestors, and the panel belongs above the
+        // card, not over the text the user is typing.
         useEffect(() => {
           if (!open) return undefined
+          let attempts = 0
           const place = () => {
-            const element = caretRef.current
+            const element = rootRef.current
             if (element === null || element === undefined) {
-              // No measurable anchor (a slot that mounts differently): keep the panel
-              // reachable instead of dropping it.
-              setAnchor({ left: Math.max(8, (window.innerWidth - 290) / 2), bottom: 96 })
+              // No ref (a shell that mounts the cell differently): keep the panel usable
+              // rather than dropping it.
+              setAnchor({ left: 0, bottom: 32 })
               return
             }
-            const rect = element.getBoundingClientRect()
-            setAnchor({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 300)), bottom: window.innerHeight - rect.top + 8 })
+            const rootRect = measure(element)
+            const card = cardOf(element)
+            const cardRect = card === null ? rootRect : measure(card)
+            if (rootRect === null || cardRect === null || rootRect.width === 0 || cardRect.height === 0) {
+              // Layout is not ready yet: show the panel at a safe default and look again
+              // on the next frame so it never opens at a stale position.
+              setAnchor({ left: 0, bottom: 32 })
+              if (attempts < 5 && typeof window.requestAnimationFrame === 'function') {
+                attempts += 1
+                window.requestAnimationFrame(place)
+              }
+              return
+            }
+            setAnchor({
+              left: Math.round(cardRect.left - rootRect.left),
+              bottom: Math.round(rootRect.bottom - cardRect.top + 8),
+            })
           }
           place()
           window.addEventListener('resize', place)
           window.addEventListener('scroll', place, true)
           const dismiss = (event) => {
-            const root = caretRef.current?.closest?.('.dswt-root')
-            if (root !== null && root !== undefined && root.contains(event.target)) return
+            const element = rootRef.current
+            if (element !== null && element !== undefined && element.contains(event.target)) return
             setOpen(false)
           }
           document.addEventListener('mousedown', dismiss)
@@ -728,7 +771,7 @@ window.__ModuleLoader__.load({
 
         return h(
           'div',
-          { className: 'dswt-root', 'data-off': off ? 'true' : 'false', 'data-busy': busy ? 'true' : 'false', role: 'group', 'aria-label': t('group.aria') },
+          { className: 'dswt-root', ref: rootRef, 'data-off': off ? 'true' : 'false', 'data-busy': busy ? 'true' : 'false', role: 'group', 'aria-label': t('group.aria') },
           h(
             'button',
             {
@@ -766,7 +809,7 @@ window.__ModuleLoader__.load({
           open && anchor !== null
             ? h(
                 'div',
-                { style: { position: 'fixed', left: anchor.left + 'px', bottom: anchor.bottom + 'px', zIndex: 60 } },
+                { className: 'dswt-pop', style: { left: anchor.left + 'px', bottom: anchor.bottom + 'px' } },
                 h(PanelView, {
                   t,
                   mode: 'session',
@@ -919,6 +962,12 @@ window.__ModuleLoader__.load({
               return h(pluginPage, props)
             },
           ),
+        )
+
+        // The sidebar glyph for the section above; the shell keeps its generic gear
+        // unless an icon is registered under the same id.
+        ctx.slots.inject('settings.section.icon', () =>
+          ctx.slots.register({ name: 'settings.section.icon', id: 'web-toggle' }, SectionIcon),
         )
 
         // Configuration page in the settings sidebar.
