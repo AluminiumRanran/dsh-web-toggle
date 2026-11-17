@@ -49,8 +49,7 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 
 - [ ] 刷新页面（必要时重启 DSH）后，输入框工具栏出现「联网」按钮，没有斜线
 - [ ] 点一下：按钮变灭态，命令回执里带 `[web:off]`
-- [ ] 同会话下一轮：模型工具列表只剩纯本地工具（`web_*`、`ops_bash`、`bsk_*`、`mcp__*` 都消失），本地读写照常可用
-- [ ] `/webtoggle local` 后 `ops_bash` 回来，`curl` 被拦、`ls` 能跑（宽松模式，红队已知可绕）
+- [ ] 同会话下一轮：模型工具列表只剩本地工具（`web_*`、`ops_bash`、`bsk_*`、`mcp__*` 都消失），本地读写照常可用
 - [ ] 另一个会话的按钮仍是亮态，可以正常联网
 - [ ] 再点一下恢复，下一轮又能联网
 - [ ] 宿主控制台没有 `tools.restrict() requires a scoped context` / `names unknown global tool` 这类报错

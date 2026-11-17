@@ -3,9 +3,8 @@
 给 DSH 对话输入框工具栏加一个**按会话独立**的断网开关。
 
 - 亮着：本会话工具齐全（含 `web_search` / `web_fetch`、shell、浏览器、MCP）。
-- 划掉（默认，**严格**）：本会话**只剩纯本地工具**——网页搜索、`ops_bash`、浏览器、MCP、视频/生图、子代理、插件管理全部从工具列表里消失，下一次请求生效。
+- 划掉：本会话**只剩本地工具**——凡是有能力出网的工具（网页搜索、`ops_bash`、浏览器、MCP、视频/生图、子代理、插件管理）全部从工具列表里消失，下一次请求生效。
 - 再点一次恢复。其他会话、其他本地功能不受影响。
-- 要跑本地命令又不想联网：`/webtoggle local`（**宽松**）——其它出网工具照样隐藏，`ops_bash` 留着但联网类命令会被拦。**这条是文本过滤，红队已证明能绕**，只当作提示，不是保证。
 
 实现手段是 DSH 内核自带的 `agent.ctx.tools.restrict({ allow: [...] })` —— 这个调用是 **agent 作用域**的，返回精确的 disposer，因此限制天然按会话隔离。用的是白名单而不是只 deny 两个名字：deny 少数几个工具挡不住 shell / 浏览器 / MCP 这些通用通道，白名单才能**默认关门**——将来别的插件新加的工具也一样被挡在外面，直到有人把它加进白名单。
 
@@ -30,7 +29,7 @@
 
 ## 它挡什么、不挡什么
 
-**只有 `/webtoggle local` 才留下 `ops_bash`**（默认严格模式连它一起隐藏）：本地命令照跑；命令里出现 `curl` / `wget` / `ssh` / `git clone` / `pnpm add` / `pip install` / `http(s)://` / UNC 共享之类，执行前被 `tools.guard()` 拦下。**红队实测**：`python socket+ssl`、`npm pack`、PowerShell 拼 URL 都能绕过——所以这层只能算"明显联网的会被挡"，不是防绕过。
+**留下、但加命令过滤**：`ops_bash`。跑本地命令（构建、测试、搬文件）照常；命令里出现 `curl` / `wget` / `ssh` / `git clone` / `pnpm add` / `pip install` / `http(s)://` / UNC 共享之类，执行前就被 `tools.guard()` 拦下并说明原因。这样本地活不断，出网的口子收紧。
 
 **隐藏**：`web_search`、`web_fetch`、浏览器工具（`bsk_*`）、`computer_*`（能驱动浏览器看网页）、全部 `mcp__*` 与 `read_mcp_resource` / `list_mcp_resources`、`video_*`、`workbuddy_*`、`subagent` / `subagent_fork` / `workflow` / `send_message`（子代理是新的 Agent，遮罩不跟过去）、`plugin_manager`（装包=下载）、`schedule_create` / `schedule_edit`（会安排另一个会话去联网）。
 

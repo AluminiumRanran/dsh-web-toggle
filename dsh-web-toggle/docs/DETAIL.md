@@ -19,7 +19,7 @@
 ## 行为
 
 - 关闭后，本会话的 Agent 上下文被 `tools.restrict({ allow: [...本地工具 + ops_bash] })` 加上遮罩：下一次请求的工具声明里只剩白名单里的名字，其余（网页搜索、浏览器、MCP、视频/生图、子代理、插件管理、定时任务）一律消失；模型硬调用只会得到 unknown tool。
-- 有两种断网模式：`/webtoggle off`（默认，严格）= 连 `ops_bash` 一起隐藏；`/webtoggle local`（宽松）= 留下 `ops_bash` 并加一道 `tools.guard()`：命令文本命中联网特征（`curl`/`wget`/`ssh`/`git clone`/`pnpm add`/`pip install`/`http(s)://`/UNC 共享/导入 `http`,`net`,`tls` 模块等）就在执行前被拒绝，本地命令照常跑。guard 与 restrict 同作用域，恢复时一并撤销。红队实测该过滤可被 `python socket+ssl`、`npm pack`、PowerShell 拼 URL 绕过（见 REDTEAM.md），所以它只是提示级别的闸门，默认不用它。
+- `ops_bash` 属于双用途工具，因此不隐藏而是加一道 `tools.guard()`：命令文本命中联网特征（`curl`/`wget`/`ssh`/`git clone`/`pnpm add`/`pip install`/`http(s)://`/UNC 共享/导入 `http`,`net`,`tls` 模块等）就在执行前被拒绝，本地命令照常跑。guard 是与 restrict 同作用域的，恢复时一并撤销。
 - 用**白名单**而不是 deny 两三个名字是有意的：`ops_bash` 可以 `curl`、浏览器工具能开页面、MCP 能转发请求，deny 少数几个永远漏。白名单默认关门，将来新插件加的工具也进不来，除非显式加名字。
 - 白名单只取"工具目录里真实存在的名字"（`tools.view().restrictableNames`），所以某个插件没装时不会因为 `restrict()` 报 unknown tool 而整体失败。
 - 恢复时调用当时存下的那个 disposer，遮罩被精确撤销，工具列表原样回来。

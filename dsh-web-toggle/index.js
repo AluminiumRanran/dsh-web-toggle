@@ -101,7 +101,7 @@ const NETWORK_COMMAND = new RegExp(
 )
 
 /** Short machine marker appended to every result text, so the browser half reads state without parsing prose. */
-const markerOf = (mode) => `[web:${mode}]`
+const markerOf = (off) => `[web:${off ? 'off' : 'on'}]`
 
 /** Render one thrown value as a short message. */
 const messageOf = (error) => (error instanceof Error ? error.message : String(error))
@@ -212,24 +212,14 @@ export function apply(ctx) {
    * @returns the result the UI renders (and the Session log records).
    */
   function report(agent, changed) {
-    const row = offSessions.get(agent.session.id)
-    const off = row !== undefined && row.agent === agent
-    const mode = off ? (row.mode ?? 'strict') : 'on'
-    const marker = markerOf(mode)
-    if (off && mode === 'local') {
-      return {
-        kind: 'success',
-        text: changed
-          ? `已断网（宽松）：网页搜索、浏览器、MCP、生图/视频、子代理全部隐藏；shell 保留但联网命令会被拦。这是文本过滤，懂行的命令仍可能绕过去——要彻底请用 /${COMMAND} off。 ${marker} / Network off (relaxed): shell stays with command filtering, which is advisory only; use /${COMMAND} off for the strict mode.`
-          : `本会话已是宽松断网，没有重复加限制。 ${marker} / The relaxed network-off state was already active.`,
-      }
-    }
+    const off = isOff(agent)
+    const marker = markerOf(off)
     if (off) {
       return {
         kind: 'success',
         text: changed
-          ? `已断网（严格）：从下一次请求起，本会话只剩纯本地工具——shell、网页搜索、浏览器、MCP、生图/视频、子代理全部隐藏。 ${marker} / Network off (strict): only local-only tools remain from the next request.`
-          : `本会话本来就处于严格断网，没有重复加限制。 ${marker} / The strict network-off state was already active.`,
+          ? `已断网：从下一次请求起，本会话只剩本地工具（shell 保留，但联网类命令会被拦下），网页搜索、浏览器、MCP、生图/视频、子代理全部隐藏。 ${marker} / Network off for this session: local work only, and shell commands that would fetch anything are refused.`
+          : `本会话本来就是断网状态，没有重复加限制。 ${marker} / The network was already off for this session.`,
       }
     }
     return {
@@ -245,14 +235,13 @@ export function apply(ctx) {
    * @param agent - the receiving Agent.
    * @returns the command result the UI renders.
    */
-  function switchOff(agent, mode) {
+  function switchOff(agent) {
     const sessionId = agent.session.id
     // The allowlist must only name tools this deployment actually registers: a name
     // that is not in the catalog would make `restrict()` throw instead of narrowing.
     // Read once per toggle — this is the only catalog-sized work the plugin ever does.
     const known = safely(() => ctx.tools.view().restrictableNames)
-    const wanted = mode === 'local' ? [...LOCAL_TOOLS, ...GUARDED_TOOLS] : [...LOCAL_TOOLS]
-    const allow = known === undefined ? [] : wanted.filter((name) => known.has(name))
+    const allow = known === undefined ? [] : [...LOCAL_TOOLS, ...GUARDED_TOOLS].filter((name) => known.has(name))
     if (allow.length === 0) {
       return {
         kind: 'error',
@@ -268,8 +257,8 @@ export function apply(ctx) {
       // Scope-bound: the restriction applies to this Agent alone, and it fails closed —
       // a tool that is not in the allowlist (including one added later) is hidden.
       dispose = agent.ctx.tools.restrict({ allow })
-      // Only the relaxed mode keeps a dual-use tool, and only then does it need a fence.
-      if (mode === 'local') disposeGuard = agent.ctx.tools.guard(networkGuard)
+      // The kept dual-use tools are fenced here rather than hidden.
+      disposeGuard = agent.ctx.tools.guard(networkGuard)
     } catch (error) {
       pendingSeries.delete(sessionId)
       if (dispose !== undefined) safely(() => dispose())
@@ -278,7 +267,7 @@ export function apply(ctx) {
         text: `无法断网 / Could not turn the network off: ${messageOf(error)}`,
       }
     }
-    offSessions.set(sessionId, { agent, mode, dispose, disposeGuard })
+    offSessions.set(sessionId, { agent, dispose, disposeGuard })
     return report(agent, true)
   }
 
@@ -328,20 +317,17 @@ export function apply(ctx) {
     }
     const requested = typeof rawInput === 'string' ? (rawInput.trim().toLowerCase().split(/\s+/)[0] ?? '') : ''
     if (requested === 'status') return report(agent, false)
-    if (requested !== '' && requested !== 'on' && requested !== 'off' && requested !== 'local') {
+    if (requested !== '' && requested !== 'on' && requested !== 'off') {
       return {
         kind: 'error',
-        text: `用法 / usage: /${COMMAND} [on|off|local|status]（off = 严格断网，local = 保留 shell 的宽松断网；不带参数则切换 on/off）`,
+        text: `用法 / usage: /${COMMAND} [on|off|status]（不带参数则切换 / no argument toggles）`,
       }
     }
     const current = isOff(agent)
-    const row = offSessions.get(agent.session.id)
-    const currentMode = current ? (row.mode ?? 'strict') : 'on'
-    // No argument flips between on and the strict off state; an explicit word selects it.
-    const nextMode = requested === '' ? (current ? 'on' : 'off') : requested
-    // Idempotent: the same state again changes nothing (and never stacks a second
-    // restriction or disposes twice).
-    if (nextMode === currentMode) return report(agent, false)
+    const next = requested === '' ? !current : requested === 'off'
+    // Idempotent: a second "off" must not stack a second restriction, and a second
+    // "on" must not dispose twice.
+    if (next === current) return report(agent, false)
     // A turn that is already running has its tool set admitted; changing the catalog
     // mid-turn would either be ignored or split one request from its declarations, so
     // this switch queues nothing and refuses instead.
@@ -351,9 +337,7 @@ export function apply(ctx) {
         text: '当前任务正在执行，等这一轮结束后再切换联网开关 / This task is running; switch the web tools after the turn ends.',
       }
     }
-    // Switching between the two off modes re-arms the mask, so lift first either way.
-    if (current) switchOn(agent)
-    return nextMode === 'on' ? report(agent, true) : switchOff(agent, nextMode)
+    return next ? switchOff(agent) : switchOn(agent)
   }
 
   ctx.commands.register({

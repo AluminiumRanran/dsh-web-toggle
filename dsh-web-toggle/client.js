@@ -53,10 +53,10 @@ window.__ModuleLoader__.load({
         'group.aria': 'Network switch',
         'label': 'Web',
         'title.on': 'Network is on for this task: web search, browser, MCP and shell tools can reach the internet. Click to cut them off.',
-        'title.off': 'Network is off for this task: the tools that reach the internet are hidden. Click to restore.',
+        'title.off': 'Network is off for this task: the internet-facing tools are hidden, and shell commands that would fetch anything are refused. Click to restore.',
         'title.running': 'This task is running; switch the web tools once the turn ends.',
         'note.off': 'Network off',
-        'note.offTitle': 'The internet-facing tools are hidden from the next request.',
+        'note.offTitle': 'The internet-facing tools are hidden from the next request; shell commands that would fetch anything are refused.',
         'note.on': 'Network on',
         'note.onTitle': 'The full tool list is back in this task from the next request.',
         'note.syncedOn': 'Network on',
@@ -72,10 +72,10 @@ window.__ModuleLoader__.load({
         'group.aria': '联网开关',
         'label': '联网',
         'title.on': '本任务可以联网：网页搜索、浏览器、MCP、shell 都能出网。点击断网。',
-        'title.off': '本任务已断网：能出网的工具都隐藏了。点击恢复。',
+        'title.off': '本任务已断网：能出网的工具都隐藏了，shell 里的联网命令会被拦。点击恢复。',
         'title.running': '当前任务正在执行，等这一轮结束后再切换联网开关。',
         'note.off': '已断网',
-        'note.offTitle': '从下一次请求起，能出网的工具都被隐藏。',
+        'note.offTitle': '从下一次请求起，能出网的工具都被隐藏，shell 里的联网命令会被拦。',
         'note.on': '已联网',
         'note.onTitle': '完整工具列表从下一次请求起回到本任务。',
         'note.syncedOn': '已联网',
@@ -113,7 +113,7 @@ window.__ModuleLoader__.load({
      */
     const parseMarker = (text) => {
       if (typeof text !== 'string') return undefined
-      const matched = /\[web:(on|off|local)\]/.exec(text)
+      const matched = /\[web:(on|off)\]/.exec(text)
       return matched === null ? undefined : matched[1]
     }
 
@@ -254,9 +254,9 @@ window.__ModuleLoader__.load({
               return quiet ? false : fail(text)
             }
             const marker = parseMarker(outcome.text)
-            if (marker !== undefined) commit(marker !== 'on')
+            if (marker !== undefined) commit(marker === 'off')
             if (quiet) return marker !== undefined
-            const nextOff = marker === undefined ? readPreference(sessionId) : marker !== 'on'
+            const nextOff = marker === undefined ? readPreference(sessionId) : marker === 'off'
             setNote(
               nextOff
                 ? { kind: 'ok', text: t('note.off'), title: t('note.offTitle') }
