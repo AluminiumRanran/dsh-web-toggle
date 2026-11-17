@@ -297,10 +297,43 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
     'ssh user@host',
     'Invoke-WebRequest http://x',
     'robocopy . \\\\server\\share /E',
+    // 红队复现：Python 原生 socket/ssl
+    `python -c "import socket;print(socket.gethostbyname('www.baidu.com'))"`,
+    `python -c "import socket,ssl;s=socket.create_connection(('x',443),12)"`,
+    `python -c "import ssl"`,
+    // 红队复现：npm 取元数据/打包
+    'npm view lodash version',
+    'npm pack lodash --pack-destination .',
+    'pnpm publish --dry-run',
+    // 红队复现：PowerShell .NET WebClient，URL 拆段拼接
+    `powershell -NoProfile -Command '$u="htt"+"ps"+"://x"; $c=New-Object Net.WebClient; $c.DownloadString($u)'`,
+    'powershell -EncodedCommand ZgBvAG8A',
+    // 编码载荷管道进 shell
+    "echo aHR0cHM6Ly9leGFtcGxlLmNvbQ== | base64 -d | sh",
+    // 其它联网子命令
+    'git submodule update --init',
+    'gh release list',
+    'pip index versions requests',
   ]) {
     assert.equal(typeof bash(command), 'string', `应拦下：${command}`)
   }
-  for (const command of ['ls -la', 'node scripts/test.mjs', 'git status', 'npm test', 'python -c "print(1+1)"', 'rm -rf tmp/x', 'cat package.json']) {
+  for (const command of [
+    'ls -la',
+    'node scripts/test.mjs',
+    'git status',
+    'git log --oneline -3',
+    'git commit -m "fix docs"',
+    'npm test',
+    'npm run build',
+    'pnpm build',
+    'pnpm run build',
+    'npm ls',
+    'python -c "print(1+1)"',
+    'python scripts/build.py',
+    'rm -rf tmp/x',
+    'cat package.json',
+    "echo 'www.baidu.com'",
+  ]) {
     assert.equal(bash(command), undefined, `不应拦下：${command}`)
   }
   assert.equal(guard({ name: 'write', arguments: { file_path: 'a' } }), undefined, '别的工具不受这个 guard 影响')

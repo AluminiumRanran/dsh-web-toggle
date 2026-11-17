@@ -83,17 +83,26 @@ const NETWORK_COMMAND = new RegExp(
   [
     // 命令行客户端
     String.raw`\b(curl|wget|nc|netcat|ncat|telnet|ssh|scp|sftp|ftp|lftp|socat|rsync|arp|nslookup|dig|ping|tracert|traceroute|whois)\b`,
-    // PowerShell / Windows 自带下载器
-    String.raw`\b(Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer|bitsadmin|certutil|mshta)\b`,
-    // 联网式包管理与仓库操作
-    String.raw`\b(git|hg)\s+(clone|fetch|pull|push|ls-remote)\b`,
-    String.raw`\b(npm|pnpm|yarn|bun)\s+(i|install|add|update|up|dlx|create)\b`,
-    String.raw`\b(pip|pip3|pipx|poetry|uv|cargo|go|gem|composer|dotnet)\s+(install|get|add|fetch|publish)\b`,
+    // PowerShell / .NET：拆段拼 URL 时类型名仍会露出来
+    String.raw`\b(Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer|bitsadmin|certutil|mshta|DownloadString|DownloadFile|WebClient|HttpClient|WebRequest|TcpClient|UdpClient|System\.Net|EncodedCommand)\b`,
+    // 联网式仓库操作
+    String.raw`\b(git|hg)\s+(clone|fetch|pull|push|ls-remote|archive|submodule)\b`,
+    // 包管理器：只列会走 registry 的子命令，run/test/build/ls 这类本地命令不受影响
+    String.raw`\b(npm|pnpm|yarn|bun)\s+(i|install|add|remove|rm|uninstall|update|up|upgrade|ci|pack|publish|view|info|show|search|audit|outdated|login|logout|adduser|whoami|token|dist-tag|deprecate|unpublish|star|stars|owner|access|org|team|repo|docs|home|ping|fetch|fund|cache|exec|dlx|create)\b`,
+    String.raw`\b(pip|pip3|pipx|poetry|uv|cargo|go|gem|composer|dotnet)\s+(install|get|add|fetch|publish|index|download|update)\b`,
+    String.raw`\bgh\s+(api|repo|release|pr|issue|auth|workflow|search|gist)\b`,
     // 脚本层：导入网络模块
-    String.raw`(require|import|from)\s*\(?\s*['"](node:)?(https?|net|tls|dns|dgram|undici|ws|aiohttp|httpx)['"]`,
-    String.raw`\b(urllib|requests|http\.client|httpx|aiohttp|axios|node-fetch|WebSocket|XMLHttpRequest)\b`,
+    String.raw`(require|import|from)\s*\(?\s*['"](node:)?(https?|net|tls|dns|dgram|undici|ws|child_process|aiohttp|httpx)['"]`,
+    String.raw`\bimport\s+(socket|ssl|asyncio|selectors|ftplib|smtplib|poplib|imaplib|telnetlib|xmlrpc|webbrowser|http\.client|urllib|requests)\b`,
+    String.raw`\bfrom\s+(socket|ssl|asyncio|selectors|ftplib|smtplib|poplib|imaplib|telnetlib|xmlrpc|webbrowser|urllib|http)\s+import\b`,
+    // 直接调网络函数（不写 import 也能连）
+    String.raw`\b(socket\.socket|create_connection|getaddrinfo|gethostbyname|wrap_socket|create_default_context|SSLSocket)\b`,
+    String.raw`\b(urllib|http\.client|httpx|aiohttp|axios|node-fetch|XMLHttpRequest)\b`,
+    // 编码载荷再交给解释器
+    String.raw`\bbase64\s+(-d|--decode|-[dD])\b[^|]*\|\s*(ba|da|z)?sh\b`,
+    String.raw`\bbase64\s+(-d|--decode|-[dD])\b[^|]*\|\s*(xargs|eval|node|python|perl)\b`,
+    // URL / 裸 IP / UNC / SMB
     String.raw`\b(https?|ftp|wss?)://|\b\d{1,3}(\.\d{1,3}){3}\b`,
-    // UNC 网络共享与 SMB 挂载
     String.raw`\\\\[A-Za-z0-9_.$-]+\b`,
     String.raw`\bnet\s+use\b|\bNew-PSDrive\b`,
   ].join('|'),
