@@ -165,3 +165,48 @@ echo 'GET / HTTP/1.1'       # 放行
 ### 不受影响的本地命令（回归基线）
 
 `pnpm run build` / `npm test` / `npm ls` / `git status` / `git log` / `git commit -m` / `python -c "print(1+1)"` / `node scripts/x.mjs` / `ls` / `rm -rf tmp/x` / `cat package.json` / `echo 'www.baidu.com'` —— 这些在断网模式下照常执行。
+
+## 第三轮：补掉三条实测绕法（同日）
+
+上一轮的红队测试找到三条新通道，其中两条是"命令里没有网络词、但结果会联网"，一条是引号拆分。已修。
+
+### 1. 引号 / 加号 / IFS 拆分 → 拦
+
+匹配前多跑一遍"去伪装"：去掉 `'` `"` 反引号 `^` 反斜杠 `+`、去掉 `${IFS}`/`$IFS`、压缩空白，再拿同一套规则匹配一遍。
+
+- `printf 'import so''cket\n' > x.py` → 还原成 `import socket`，拦。
+- `echo "cur""l example"` → 还原成 `curl example`，拦。
+- `python -c "s=__import__('so'+'cket')"` → 还原成 `__import__(socket)`，拦（新增 `__import__` 规则）。
+
+### 2. 写盘再执行 → 读出脚本内容再判断
+
+命令里出现解释器（python/node/bash/pwsh/source）或 `./x.sh` 这类引用，并且带脚本扩展名的参数时，按 `workdir` → 会话目录 → 进程目录的顺序**真的把文件读出来**（上限 256 KB），再用同一套规则匹配；还能往下看一层（脚本里再调脚本）。读不到就放行——一个读不到的文件也跑不起来，对读不到的东西 fail-closed 会误伤正常工程。
+
+- `python probe_exec.py`（内容有 `import socket`）→ 拦。
+- `python plain.py`（纯本地）→ 放行。
+
+### 3. `npm run <script>` → 读 package.json 的脚本体
+
+`npm run deploy` 如果 deploy 是 `curl ...`，等价于直接敲 curl。现在会读最近的 `package.json`，取 `scripts[name]` 的内容再跑一遍同样的规则，并检查脚本体里引用的脚本文件。
+
+- `npm run deploy`（deploy = `curl ...`）→ 拦。
+- `npm run build` / `npm run dev`（vite 之类）→ 放行。
+
+### 同时修掉两处误判
+
+| 之前被误拦 | 现在 |
+| --- | --- |
+| `python -c "import asyncio;print('ok')"` | 放行（`asyncio` 本身是本地运行时；只拦 `asyncio.open_connection`） |
+| `python -c "print('1.2.3.4')"` | 放行（裸点分数字当 IP 拦会命中版本号、构建号、日志数字，规则已删除） |
+
+回归基线（`tmp/probe-guard.mjs` 的 19 条）包含 `git status` / `git commit -m "fix requests"` / `node scripts/x.mjs` / `python -m pytest` / `pnpm build` / `powershell -Command "Get-ChildItem"` / `echo 1.2.3.4` 等，全部放行。
+
+### 这一轮之后仍然拦不住的（诚实清单）
+
+| 通道 | 为什么 |
+| --- | --- |
+| 运行时拼字符串造名字：`chr(115)+chr(111)+...`、`getattr(mod, name)` 的变体 | 文本里没有任何关键词，只有真正的解释器知道会拼出什么 |
+| 脚本放在三个候选目录之外（读不到 → 放行） | 读不到就无法判断；换成 fail-closed 会让正常工程也挂 |
+| 编译器产出联网二进制（gcc/rustc/…） | 文本层只看到"编译"，看不到产物行为 |
+| 已在运行的进程、计划任务、服务 | 闸门只在新起命令这一步 |
+| 解释器里 `exec` 解码后的动态载荷（`b64decode`/`fromhex` 已拦，但 `codecs`、`zlib`、自定义解码仍可能） | 同第一条：解码发生在运行时 |

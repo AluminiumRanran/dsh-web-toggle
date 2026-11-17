@@ -23,6 +23,9 @@
  * The Host half has no locale service, so command text is bilingual.
  */
 
+import { readFileSync, statSync } from 'node:fs'
+import { isAbsolute, resolve } from 'node:path'
+
 export const inject = ['commands', 'agents', 'tools']
 
 /** The command name. */
@@ -94,7 +97,14 @@ const OFFLINE_NOTICE =
 
 const GUARDED_TOOLS = ['ops_bash']
 
-/** Words that mean "this command wants the network": binaries, schemes, package fetches. */
+/**
+ * Words that mean "this command wants the network": binaries, schemes, package fetches,
+ * and the module names an interpreter needs before it can open a socket.
+ *
+ * Two rules were deliberately removed after a red-team pass, because they fired on
+ * ordinary local work: a bare dotted quad (version numbers, build ids, log fragments)
+ * and `asyncio` itself (`asyncio.sleep` is local; only `open_connection` leaves).
+ */
 const NETWORK_COMMAND = new RegExp(
   [
     // 命令行客户端
@@ -109,21 +119,184 @@ const NETWORK_COMMAND = new RegExp(
     String.raw`\bgh\s+(api|repo|release|pr|issue|auth|workflow|search|gist)\b`,
     // 脚本层：导入网络模块
     String.raw`(require|import|from)\s*\(?\s*['"](node:)?(https?|net|tls|dns|dgram|undici|ws|child_process|aiohttp|httpx)['"]`,
-    String.raw`\bimport\s+(socket|ssl|asyncio|selectors|ftplib|smtplib|poplib|imaplib|telnetlib|xmlrpc|webbrowser|http\.client|urllib|requests)\b`,
-    String.raw`\bfrom\s+(socket|ssl|asyncio|selectors|ftplib|smtplib|poplib|imaplib|telnetlib|xmlrpc|webbrowser|urllib|http)\s+import\b`,
+    String.raw`\bimport\s+(socket|ssl|ftplib|smtplib|poplib|imaplib|telnetlib|xmlrpc|webbrowser|http\.client|urllib|requests)\b`,
+    String.raw`\bfrom\s+(socket|ssl|ftplib|smtplib|poplib|imaplib|telnetlib|xmlrpc|webbrowser|urllib|http)\s+import\b`,
     // 直接调网络函数（不写 import 也能连）
-    String.raw`\b(socket\.socket|create_connection|getaddrinfo|gethostbyname|wrap_socket|create_default_context|SSLSocket)\b`,
+    String.raw`\b(socket\.socket|create_connection|open_connection|getaddrinfo|gethostbyname|wrap_socket|create_default_context|SSLSocket)\b`,
     String.raw`\b(urllib|http\.client|httpx|aiohttp|axios|node-fetch|XMLHttpRequest)\b`,
+    // 动态导入与解码载荷：`__import__('so'+'cket')`、`b64decode(...)` 都是藏名字的写法
+    String.raw`__import__\s*\(\s*['"]?(socket|ssl|urllib|requests|http)`,
+    String.raw`\b(b64decode|unhexlify|fromhex)\b`,
     // 编码载荷再交给解释器
     String.raw`\bbase64\s+(-d|--decode|-[dD])\b[^|]*\|\s*(ba|da|z)?sh\b`,
     String.raw`\bbase64\s+(-d|--decode|-[dD])\b[^|]*\|\s*(xargs|eval|node|python|perl)\b`,
-    // URL / 裸 IP / UNC / SMB
-    String.raw`\b(https?|ftp|wss?)://|\b\d{1,3}(\.\d{1,3}){3}\b`,
+    // URL / UNC / SMB
+    String.raw`\b(https?|ftp|wss?)://`,
     String.raw`\\\\[A-Za-z0-9_.$-]+\b`,
     String.raw`\bnet\s+use\b|\bNew-PSDrive\b`,
   ].join('|'),
   'i',
 )
+
+/**
+ * The same keyword test with quoting tricks undone: `import so''cket`, `"cur""l"`,
+ * `c\url` and `${IFS}` separated words all collapse to the literal the shell or the
+ * interpreter ends up executing.
+ * @param text - one command or script body.
+ * @returns the collapsed form used for a second match pass.
+ */
+const squashQuotes = (text) =>
+  text
+    .replace(/['"`^\\+]/g, '')
+    .replace(/\$\{?ifs\}?/gi, '')
+    .replace(/\s+/g, ' ')
+
+/**
+ * Does this text look like network traffic?
+ * @param text - a command line or a script body.
+ * @returns true when either the literal or the de-quoted form matches.
+ */
+const looksNetworked = (text) => NETWORK_COMMAND.test(text) || NETWORK_COMMAND.test(squashQuotes(text))
+
+/** Scripts a shell can hand to an interpreter, by extension. */
+const SCRIPT_EXT = /\.(py|pyw|js|mjs|cjs|ts|mts|cts|sh|zsh|bash|ps1|psm1|rb|pl|php|bat|cmd)$/i
+
+/** Interpreters that take a file argument. */
+const INTERPRETER =
+  /(^|[\s;&|(])(python3?|py|node|nodejs|bun|deno|ruby|perl|php|bash|sh|zsh|pwsh|powershell|source)(?=[\s;&|)]|$)/i
+
+/** Read at most this much of a script before giving up (a huge file is not a script we fence). */
+const MAX_SCRIPT_BYTES = 256 * 1024
+
+/**
+ * Split a command line into argument-ish tokens, keeping quoted runs together.
+ * @param command - the raw command.
+ * @returns the tokens with their quotes removed.
+ */
+function tokensOf(command) {
+  const out = []
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g
+  let match
+  while ((match = re.exec(command)) !== null) out.push(match[1] ?? match[2] ?? match[3])
+  return out
+}
+
+/**
+ * Files in this command line that look like scripts.
+ * @param command - the raw command.
+ * @returns one entry per candidate path.
+ */
+function scriptRefs(command) {
+  const refs = []
+  for (const token of tokensOf(command)) {
+    const text = token.replace(/^['"]|['"]$/g, '')
+    if (text.length === 0 || text.startsWith('-')) continue
+    if (SCRIPT_EXT.test(text)) refs.push(text)
+  }
+  return refs
+}
+
+/**
+ * Read a script a command is about to run, resolving it against the directories the
+ * call could be using. Returns undefined when nothing readable is found, in which case
+ * the call is allowed: a fence that fails closed on an unreadable path would break
+ * ordinary work, and a script that is not on disk cannot run either.
+ * @param exec - the pending execution, for `workdir` and the Session directory.
+ * @param ref - the path from the command line.
+ * @returns the script text, or undefined.
+ */
+function readScript(exec, ref) {
+  const bases = []
+  const args = exec.arguments
+  if (args !== null && typeof args === 'object' && typeof args.workdir === 'string' && args.workdir !== '')
+    bases.push(args.workdir)
+  const cwd = exec.agent?.session?.cwd
+  if (typeof cwd === 'string' && cwd !== '') bases.push(cwd)
+  bases.push(process.cwd())
+  for (const base of bases) {
+    const path = isAbsolute(ref) ? ref : resolve(base, ref)
+    try {
+      if (statSync(path).size > MAX_SCRIPT_BYTES) return ''
+      return readFileSync(path, 'utf8')
+    } catch {
+      continue
+    }
+  }
+  return undefined
+}
+
+/**
+ * Inspect the scripts a command line is about to run, one level deep, because writing
+ * a script and running it was the cheapest way around a text-only fence.
+ * @param exec - the pending execution.
+ * @param command - a command line or the body of another script.
+ * @param depth - how many hops are still allowed.
+ * @returns a denial reason, or undefined.
+ */
+function inspectScripts(exec, command, depth = 0) {
+  if (!INTERPRETER.test(command) && !/(^|[\s;&|])[./]/.test(command)) return undefined
+  for (const ref of scriptRefs(command)) {
+    const text = readScript(exec, ref)
+    if (text === undefined || text === '') continue
+    if (looksNetworked(text)) return `本会话已断网：脚本 ${ref} 里含联网调用，执行前被拦下。`
+    if (depth < 1) {
+      const nested = inspectScripts(exec, text, depth + 1)
+      if (nested !== undefined) return nested
+    }
+  }
+  return undefined
+}
+
+/** `npm run x` / `pnpm x` / `yarn x` / `bun x`. */
+const PACKAGE_SCRIPT = /(?:^|[\s;&|(])npm\s+(?:run|run-script)\s+([^\s;&|]+)|(?:^|[\s;&|(])(?:pnpm|yarn|bun)\s+(?:run\s+)?([^\s;&|]+)/i
+
+/**
+ * Read a script body out of the nearest package.json.
+ * @param exec - the pending execution, for `workdir` and the Session directory.
+ * @param name - the script name.
+ * @returns the body, or undefined when no package.json names it.
+ */
+function packageScriptBody(exec, name) {
+  const args = exec.arguments
+  const bases = []
+  if (args !== null && typeof args === 'object' && typeof args.workdir === 'string' && args.workdir !== '')
+    bases.push(args.workdir)
+  const cwd = exec.agent?.session?.cwd
+  if (typeof cwd === 'string' && cwd !== '') bases.push(cwd)
+  bases.push(process.cwd())
+  for (const base of bases) {
+    try {
+      const file = resolve(base, 'package.json')
+      if (statSync(file).size > MAX_SCRIPT_BYTES) continue
+      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      const body = parsed?.scripts?.[name]
+      if (typeof body === 'string') return body
+    } catch {
+      continue
+    }
+  }
+  return undefined
+}
+
+/**
+ * `npm run deploy` where deploy is `curl ...` is the same request as `curl ...`,
+ * only one indirection away. Look the body up and apply the same rules to it.
+ * @param exec - the pending execution.
+ * @param command - the command line.
+ * @returns a denial reason, or undefined.
+ */
+function inspectPackageScript(exec, command) {
+  const match = PACKAGE_SCRIPT.exec(command)
+  if (match === null) return undefined
+  const name = match[1] ?? match[2]
+  if (typeof name !== 'string' || name.startsWith('-')) return undefined
+  const body = packageScriptBody(exec, name)
+  if (typeof body !== 'string') return undefined
+  if (looksNetworked(body)) return `本会话已断网：脚本 ${name} 里含联网调用，执行前被拦下。`
+  const nested = inspectScripts(exec, body)
+  if (nested !== undefined) return nested
+  return undefined
+}
 
 /** Short machine marker appended to every result text, so the browser half reads state without parsing prose. */
 const markerOf = (off) => `[web:${off ? 'off' : 'on'}]`
@@ -169,8 +342,15 @@ export function apply(ctx) {
     if (typeof command !== 'string') {
       return `本会话已断网：这条工具调用没有可检查的命令文本，为稳妥起见拒绝执行。${OFFLINE_NOTICE}`
     }
-    if (!NETWORK_COMMAND.test(command)) return undefined
-    return `本会话已断网：这条命令看起来会联网（下载、远程连接或网络 URL），已被拦下。本地命令照常可以执行。${OFFLINE_NOTICE}`
+    if (looksNetworked(command)) {
+      return `本会话已断网：这条命令看起来会联网（下载、远程连接或网络 URL），已被拦下。本地命令照常可以执行。${OFFLINE_NOTICE}`
+    }
+    // 写脚本再执行原本是最省事的绕法：命令本身没有网络词，脚本里有。
+    const script = inspectScripts(exec, command)
+    if (script !== undefined) return `${script}${OFFLINE_NOTICE}`
+    const packaged = inspectPackageScript(exec, command)
+    if (packaged !== undefined) return `${packaged}${OFFLINE_NOTICE}`
+    return undefined
   }
 
   /**

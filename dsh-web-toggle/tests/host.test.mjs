@@ -4,6 +4,9 @@
  * 用法：node tests/host.test.mjs
  */
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { apply } from '../index.js'
 
 /** 假工具目录：本地工具 + 各种能出网的通道 + 一个未列入白名单的本地工具。 */
@@ -350,6 +353,42 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
 
   call(agent, 'on')
   assert.deepEqual(guardDisposals, ['registered', 'lifted'], '恢复时应撤销 guard')
+  // —— 第二轮红队：引号拆分、脚本文件、npm run ——
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-web-toggle-'))
+  const pkg = path.join(tmp, 'pkg')
+  fs.mkdirSync(pkg)
+  fs.writeFileSync(path.join(tmp, 'net.py'), "import socket\nprint(socket.gethostbyname('x'))\n")
+  fs.writeFileSync(path.join(tmp, 'plain.py'), "print('local only')\n")
+  fs.writeFileSync(path.join(tmp, 'plain.js'), "console.log('local only')\n")
+  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({
+    scripts: { deploy: 'curl https://example.com', build: 'node plain.js', dev: 'vite --host' },
+  }))
+  fs.writeFileSync(path.join(pkg, 'plain.js'), "console.log('local only')\n")
+
+  // 引号拆分能被还原后命中
+  assert.equal(typeof bash(`printf 'import so''cket\n' > ${path.join(tmp, 'x.py')}`), 'string', "so''cket 要能还原成 socket")
+  assert.equal(typeof bash('echo "cur""l example"'), 'string', '"cur""l" 要能还原成 curl')
+  // 写盘再执行：读脚本内容
+  assert.equal(typeof bash(`python ${path.join(tmp, 'net.py')}`), 'string', '执行含 socket 的脚本要拦')
+  assert.equal(bash(`python ${path.join(tmp, 'plain.py')}`), undefined, '纯本地脚本照常放行')
+  assert.equal(bash(`node ${path.join(tmp, 'plain.js')}`), undefined, '纯本地 node 脚本照常放行')
+  // npm run 的脚本体要看
+  const runScript = (command) => guard({ name: 'ops_bash', arguments: { command, workdir: pkg } })
+  assert.equal(typeof runScript('npm run deploy'), 'string', 'npm 脚本体里的 curl 要拦')
+  assert.equal(typeof runScript('pnpm deploy'), 'string', 'pnpm 脚本体同样要拦')
+  assert.equal(runScript('npm run build'), undefined, '本地 npm 脚本照常放行')
+  assert.equal(runScript('npm run dev'), undefined, 'vite 之类本地脚本不受影响')
+
+  // 加号拼接 / 动态导入 / 解码载荷
+  assert.equal(typeof bash(`python -c "s=__import__('so'+'cket')"`), 'string', '加号拼接的模块名要还原')
+  assert.equal(typeof bash(`python -c "import base64;exec(base64.b64decode('eA=='))"`), 'string', 'b64decode 包裹的载荷要拦')
+
+  // —— 误判修复：asyncio、点分数字 ——
+  assert.equal(bash(`python -c "import asyncio;print('ok')"`), undefined, 'asyncio 本身不该拦')
+  assert.equal(bash(`python -c "print('1.2.3.4')"`), undefined, '点分数字不该当成 IP 拦')
+  assert.equal(bash(`node -e "console.log('v1.2.3.4')"`), undefined, '版本号同样放行')
+  assert.equal(typeof bash(`python -c "import asyncio;asyncio.open_connection('h',80)"`), 'string', 'asyncio.open_connection 仍要拦')
+
   console.log('12 shell 命令过滤 ok')
 }
 
