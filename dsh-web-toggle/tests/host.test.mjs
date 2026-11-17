@@ -269,20 +269,23 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
   ]) {
     assert.equal(allow.has(name), false, `断网后不应保留 ${name}`)
   }
-  for (const name of ['ops_bash', 'ops_inspect_local_file', 'ops_glob', 'ops_grep', 'write', 'edit', 'todo_write', 'present', 'remember']) {
+  for (const name of ['ops_inspect_local_file', 'ops_glob', 'ops_grep', 'write', 'edit', 'todo_write', 'present', 'remember']) {
     assert.equal(allow.has(name), true, `断网后应保留本地工具 ${name}`)
   }
   assert.equal(allow.has('read'), false, '未列入白名单的工具默认隐藏（fail closed）')
   assert.equal(allow.has('acp_cache'), false, '目录里没有的名字应被过滤，而不是让 restrict 抛错')
   assert.equal(allow.has('schedule_list'), true, '只读的计划查询属于本地工具')
+  assert.equal(allow.has('ops_bash'), false, '严格断网连 shell 一起隐藏')
   console.log('11 白名单内容 ok')
 }
 
 // 12. 双用途工具（ops_bash）留着，但联网命令被 guard 拦下
 {
-  const { agent, guards, guardDisposals } = makeAgent('s13')
-  call(agent, 'off')
-  assert.equal(guards.length, 1, '关闭时应注册一个 guard')
+  const { agent, guards, guardDisposals, restrictions } = makeAgent('s13')
+  call(agent, 'local')
+  assert.equal(guards.length, 1, '宽松断网应注册一个 guard')
+  assert.equal(restrictions.length, 1)
+  assert.ok(restrictions[0].allow.includes('ops_bash'), '宽松断网保留 shell')
   const guard = guards[0]
   const bash = (command) => guard({ name: 'ops_bash', arguments: { command } })
 
@@ -309,6 +312,28 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
   call(agent, 'on')
   assert.deepEqual(guardDisposals, ['registered', 'lifted'], '恢复时应撤销 guard')
   console.log('12 shell 命令过滤 ok')
+}
+
+// 13. 两种断网模式：strict 不注册 guard，local 才注册；strict ⇄ local 会重挂遮罩
+{
+  const { agent, guards } = makeAgent('s14')
+  const strict = call(agent, 'off')
+  assert.match(strict.text, /\[web:off\]/, 'strict 标记为 [web:off]')
+  assert.equal(guards.length, 0, 'strict 不注册 guard（shell 已隐藏）')
+
+  const relaxed = call(agent, 'local')
+  assert.match(relaxed.text, /\[web:local\]/, 'local 标记为 [web:local]')
+  assert.equal(guards.length, 1, 'local 注册 guard')
+
+  const again = call(agent, 'local')
+  assert.equal(again.text.includes('没有重复加限制'), true, '重复 local 幂等')
+  assert.equal(guards.length, 1)
+
+  const back = call(agent, 'off')
+  assert.match(back.text, /\[web:off\]/, '可以从 local 切回 strict')
+  const on = call(agent, 'on')
+  assert.match(on.text, /\[web:on\]/, '恢复联网')
+  console.log('13 两种断网模式 ok')
 }
 
 console.log('\n全部通过')
