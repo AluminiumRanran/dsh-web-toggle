@@ -471,7 +471,11 @@ function makeConfigCtx(initial = {}) {
   assert.deepEqual(stateOf(added.text).session, ['read'], '状态里要出现本会话白名单')
   await call2(agent, 'allow add read')
   assert.deepEqual(values.sessionTools.c1, ['read'], '重复添加不该出现两条')
-  assert.equal((await call2(agent, 'allow add nope')).kind, 'error', '目录里没有的工具要拒绝（防手误）')
+  // 目录里没有的名字照样记下，但要明确提醒（目录可能只覆盖当前作用域）。
+  const typo = await call2(agent, 'allow add nope')
+  assert.equal(typo.kind, 'success', '未知名字不该再硬拒绝')
+  assert.ok(typo.text.includes('没有在当前目录里找到 nope'), '要提示名字可能写错')
+  await call2(agent, 'allow remove nope')
 
   // 全局白名单
   const global = await call2(agent, 'allow add write --global')

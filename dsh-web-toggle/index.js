@@ -575,7 +575,9 @@ export function apply(ctx, config) {
     const sessionId = agent?.session?.id
     const wanted = [...LOCAL_TOOLS, ...GUARDED_TOOLS, ...confTools('globalTools'), ...sessionToolsOf(sessionId)]
     const unique = wanted.filter((name, index) => wanted.indexOf(name) === index)
-    const known = safely(() => ctx.tools.view().restrictableNames)
+    // Ask the Agent's own view first: it is the same view `restrict()` validates against,
+    // and it also sees tools the Session's preset registered on top of the globals.
+    const known = safely(() => agent?.ctx?.tools?.view?.().restrictableNames) ?? safely(() => ctx.tools.view().restrictableNames)
     if (known === undefined) return []
     return unique.filter((name) => known.has(name))
   }
@@ -790,12 +792,15 @@ export function apply(ctx, config) {
     if (name === '') {
       return result(agent, 'error', `用法 / usage: /${COMMAND} allow ${removing ? 'remove' : 'add'} <tool> [--global]`)
     }
-    // A name the catalog does not know is almost always a typo; saying so beats a
-    // keep-list entry that silently does nothing.
-    const known = safely(() => ctx.tools.view().knownNames)
-    if (!removing && known !== undefined && !known.has(name)) {
-      return result(agent, 'error', `没有名为 ${name} 的工具 / no registered tool is named "${name}"`)
-    }
+    // The catalog is asked twice: the root view knows the global tools, the agent's own
+    // view also knows whatever this Session's preset registered. A name outside both is
+    // almost always a typo, but it is only a warning — a tool registered later, or by a
+    // sibling scope, still belongs in the keep list.
+    const rootKnown = safely(() => ctx.tools.view().knownNames)
+    const agentKnown = safely(() => agent?.ctx?.tools?.view?.().knownNames)
+    const recognized =
+      (rootKnown !== undefined && rootKnown.has(name)) || (agentKnown !== undefined && agentKnown.has(name))
+    const unknown = removing || recognized ? '' : `没有在当前目录里找到 ${name}（照样记下了，拼错就不会生效）/ "${name}" is not in the current catalog (kept anyway)`
     const editor = allowEditor(global, agent.session.id)
     const saved = await saveConfig((current) => {
       const list = editor.read(current)
@@ -809,7 +814,8 @@ export function apply(ctx, config) {
       ? `已从${scope}保留名单移除 ${name} / Removed "${name}" from the ${global ? 'global' : 'Session'} keep-list.`
       : `已把 ${name} 加入${scope}保留名单：断网时它也保留 / Added "${name}" to the ${global ? 'global' : 'Session'} keep-list; it stays available while the network is off.`
     const tunedText = tuned.applied === 0 && tuned.skipped === 0 ? '' : ` 已刷新 ${tuned.applied}${tuned.skipped === 0 ? '' : `，跳过 ${tuned.skipped}（正在执行）`}`
-    return result(agent, 'success', `${note}${tunedText} ${describeConfig(agent)}`)
+    const warning = unknown === '' ? '' : `${unknown}；`
+    return result(agent, 'success', `${warning}${note}${tunedText} ${describeConfig(agent)}`)
   }
 
   /**
