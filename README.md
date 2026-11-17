@@ -1,8 +1,10 @@
 # dsh-web-toggle
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）对话输入框工具栏加一个**按会话独立**的断网开关：点灭之后，本会话里标成「隐藏」的工具从模型眼前消失（出厂默认包括 `web_search` / `web_fetch`、浏览器、MCP、子代理、插件管理、定时任务），`ops_bash` 这类通用执行器保留但每次调用前过一遍联网内容检查，**其余工具照常可用**；再点一次恢复。只影响这一个会话。
+为 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）对话输入框工具栏加一个**按会话独立**的断网开关：点灭之后，本会话里标成「隐藏」的工具从模型眼前消失（出厂默认包括 `web_search` / `web_fetch`、浏览器、MCP、子代理、插件管理、定时任务），`ops_bash` 这类通用执行器保留但每次调用前过一遍联网内容检查；再点一次恢复。只影响这一个会话。
 
-每个工具有三种模式：`keep`（保留）/ `hide`（隐藏）/ `inspect`（保留但检查内容）。出厂只标例外、不维护白名单——所以没见过的工具默认放行，不会误伤。
+每个工具有四种模式：`keep`（放行）/ `hide`（拒绝，藏起来）/ `inspect`（检查）/ `refuse`（调用时拒绝）。出厂只标例外、不维护白名单——**没见过的工具默认「检查」**：还在列表里，但每次调用都看一眼参数，既不误放也不会把工具表改乱。
+
+两条与缓存有关的规则：**不切换就隐藏；要切换 / 热调整就用「调用时拒绝」**——只有 `hide` 会改动工具列表、打断提示词缓存。会话开始之后，插件会自动把 `hide` 按 `refuse` 执行，并（默认）锁住开关，避免半路换掉工具声明。
 
 ![位置：输入框左边的小地球](dsh-web-toggle/icon.svg)
 
@@ -10,16 +12,16 @@
 
 **方式一：单个 tgz（发行版）**
 
-从 [Releases](../../releases) 下载 `dsh-web-toggle-0.4.0.tgz`，然后在 DSH 里：
+从 [Releases](../../releases) 下载 `dsh-web-toggle-0.6.0.tgz`，然后在 DSH 里：
 
 ```
-plugin_manager install_bundle target="file:/绝对路径/dsh-web-toggle-0.4.0.tgz"
+plugin_manager install_bundle target="file:/绝对路径/dsh-web-toggle-0.6.0.tgz"
 ```
 
 **方式二：从 npm**
 
 ```
-plugin_manager install_bundle target="dsh-web-toggle@0.4.0"
+plugin_manager install_bundle target="dsh-web-toggle@0.6.0"
 ```
 
 **方式三：从源码目录**
@@ -40,19 +42,20 @@ git clone <this repo>
 /webtoggle                        切换
 /webtoggle on|off                 显式开关（幂等）
 /webtoggle status                 只读状态
-/webtoggle tools                  列出全部工具与各自模式
-/webtoggle mode <tool> keep|hide|inspect [--global]
+/webtoggle tools                  报一句「共 N 个工具」，--json 才给目录
+/webtoggle lock on|off            开关「会话开始后锁定开关」
+/webtoggle mode <tool> keep|hide|inspect|refuse [--global]
 /webtoggle mode reset [--global]
 ```
 
-轮次正在执行时会被拒绝，等这一轮结束再点。
+轮次正在执行时会被拒绝，等这一轮结束再点。**面板里的点击不写聊天日志**：按钮写的是本插件的配置，宿主在下一个请求前落到 `restrict()` / `guard()` 上；只有手敲命令才留回执。
 
 ## 它做什么
 
 - 用内核自带的 `agent.ctx.tools.restrict({ deny })` 做**例外表**：断网时只 deny 那些标了 `hide` 的工具，`inspect` 的工具照常可见。作用域绑定在 agent 上，所以按会话隔离、可逆。
 - `inspect` 模式的工具（默认 `ops_bash`）用同一作用域的 `agent.ctx.tools.guard()` 做内容检查（三层：字面匹配、去引号/加号/IFS 伪装后再匹配、读出要执行的脚本和 `npm run` 的脚本体再匹配）。
 - 拒绝理由写成**给模型的指令**：不要换工具、不要写脚本或编码后执行、不要起子进程找替代通道；真需要联网就停下请用户打开开关。
-- 模式分「本会话 / 全局 / 出厂默认」三层，界面改动即时生效。
+- 模式分「本会话 / 全局 / 出厂默认」三层，界面改动即时生效；开始说话的会话把 `hide` 按 `refuse` 执行，保住缓存。
 
 ## 它挡不住什么
 
@@ -65,7 +68,7 @@ git clone <this repo>
 ```
 dsh-web-toggle/     插件源码（Host 半侧 index.js、Browser 半侧 client.js、patch、locale、图标）
 dsh-web-toggle/docs/设计细节、红队记录、验证清单
-dsh-web-toggle/tests/离线测试（host 16 组、client 14 组）
+dsh-web-toggle/tests/离线测试（host 18 组、client 15 组）
 PROMPT.md           最初的实现要求（保留作为设计背景）
 ```
 

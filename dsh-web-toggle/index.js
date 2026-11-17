@@ -53,6 +53,8 @@ export const Config = z.object({
   sessionModes: z.dict(z.dict(z.string())).default({}).volatile().description('Per-tool mode overrides for one Session, keyed by Session id.'),
   offSessions: z.dict(z.boolean()).default({}).volatile().description('Sessions whose switch is off, keyed by Session id. The browser half writes this instead of running a command, so flipping the switch in a panel leaves no receipt in the chat.'),
   knownTools: z.array(z.string()).default([]).volatile().description('Tool names seen last turn. The panel draws its list from here, so browsing tools never writes a chat receipt.'),
+  lockAfterStart: z.boolean().default(true).volatile().description('Lock the on/off switch once this Session has started. A conversation that already exists keeps its tool list, so the switch cannot rewrite it; turn this off to allow changes mid-conversation.'),
+  startedSessions: z.dict(z.boolean()).default({}).volatile().description('Sessions that have already run a step, keyed by Session id. Written by the Host itself at the first admitted step.'),
 })
 
 /** Settings field of each browser surface, keyed by the name the command accepts. */
@@ -568,6 +570,11 @@ export function apply(ctx, config) {
     const agent = payload?.agent
     if (agent === undefined || agent.session === undefined) return decision
     if (decision?.kind !== 'enter') return decision
+    // 这一轮真的要发请求了：从这个时刻起，这个 Session 算「已经开始」，开关按配置可能上锁。
+    // 放在 pendingSeries 判断之前，否则「工具表没变」的轮次会被提前 return 掉。
+    if (payload.signal?.aborted !== true && Array.isArray(decision.messages) && decision.messages.length > 0) {
+      markStarted(agent.session.id)
+    }
     if (!pendingSeries.has(agent.session.id)) return decision
     // A step the loop will abandon (cancelled, or an empty admission) never becomes a
     // request, so consuming the mark there would silently drop the series restart.
@@ -612,6 +619,34 @@ export function apply(ctx, config) {
     return map[sessionId] === true
   }
 
+  /** Sessions this Host has watched run at least one step. */
+  function startedOf(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return false
+    const map = conf('startedSessions', {})
+    if (map === null || typeof map !== 'object' || Array.isArray(map)) return false
+    return map[sessionId] === true
+  }
+
+  /**
+   * 会话开始后，开关默认被锁住：已经存在的对话不应看到工具表被改写。
+   * @param agent - the Agent whose Session is asked about.
+   */
+  function lockActive(agent) {
+    if (conf('lockAfterStart', true) !== true) return false
+    return startedOf(agent?.session?.id)
+  }
+
+  /** 记下「这个 Session 已经跑过一轮」，只在第一次真正写盘。 */
+  function markStarted(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '' || startedOf(sessionId)) return
+    void saveConfig((current) => {
+      const raw = current.startedSessions
+      const map = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw } : {}
+      map[sessionId] = true
+      return { ...current, startedSessions: map }
+    }).catch(() => {})
+  }
+
   /**
    * Whether the web tools are denied for the Agent in front of us. A row left behind
    * by an earlier Agent of the same Session does not count: the restriction lives on
@@ -651,6 +686,12 @@ export function apply(ctx, config) {
     if (sessionId === undefined) return false
     const desired = desiredOff(sessionId)
     if (desired === isOff(agent)) return false
+    // 会话已经开始、开关又锁着：面板写进来的配置不算数。把配置改回运行时的样子，
+    // 这样面板下一次读到的就是真实状态，不会显示一个根本没生效的开关。
+    if (lockActive(agent)) {
+      persistOff(agent, isOff(agent)).catch(() => {})
+      return false
+    }
     // switchOff/switchOn 自己会往 pendingSeries 里塞标记，pre-step 随后把它翻成
     // startsRequestSeries，于是这一轮的请求会用新的工具表重建。
     if (desired) switchOff(agent)
@@ -671,6 +712,8 @@ export function apply(ctx, config) {
       global: modesAt(conf('toolModes', {})),
       session: sessionModesOf(sessionId),
       writable: canSave(),
+      started: sessionId === undefined ? false : startedOf(sessionId),
+      locked: sessionId === undefined ? false : lockActive(agent),
     }
   }
 
@@ -805,9 +848,13 @@ export function apply(ctx, config) {
     const hide = []
     const inspect = []
     const refuse = []
+    // 对话已经开始了，就不能再把工具从列表里拿掉：工具声明在请求头部，删掉一个名字
+    // 等于把整段前缀重写一遍，缓存命中当场清零。所以「隐藏」在这个时刻降级成
+    // 「调用时拒绝」——工具还在列表里，但每次调用都被拒，缓存前缀一个字节都不动。
+    const started = startedOf(agent?.session?.id)
     for (const name of scopedNames(agent)) {
       const mode = modeOf(agent, name)
-      if (mode === 'hide') hide.push(name)
+      if (mode === 'hide') (started ? refuse : hide).push(name)
       else if (mode === 'inspect') inspect.push(name)
       else if (mode === 'refuse') refuse.push(name)
     }
@@ -1015,7 +1062,10 @@ export function apply(ctx, config) {
     const { hide, inspect, refuse } = splitByMode(agent)
     const flags = `pluginPage=${surfaces.plugin ? 'on' : 'off'} settingsSection=${surfaces.settings ? 'on' : 'off'} composerPanel=${surfaces.composer ? 'on' : 'off'}`
     const writable = canSave() ? '' : '（本 profile 不能写配置，改动只在本次运行生效 / this profile cannot save, changes last until restart）'
-    return `${flags}；隐藏 ${hide.length} 个、内容检查 ${inspect.length} 个、调用时拒绝 ${refuse.length} 个，其余放行 / hiding ${hide.length}, inspecting ${inspect.length}, refusing ${refuse.length}, everything else kept.${writable}`
+    const started = startedOf(agent?.session?.id)
+    const lock = conf('lockAfterStart', true) === true ? 'on' : 'off'
+    const stage = started ? '本会话已开始（隐藏按运行时拒绝执行，以保住缓存） / this Session has started (hide is enforced as refuse, so the cached prefix survives)' : '本会话还没开始 / this Session has not started'
+    return `${flags} lock=${started ? (lock === 'on' ? 'locked' : 'open') : 'new'}；${stage}；隐藏 ${hide.length} 个、内容检查 ${inspect.length} 个、调用时拒绝 ${refuse.length} 个，其余放行 / ${started ? '' : ''}hiding ${hide.length}, inspecting ${inspect.length}, refusing ${refuse.length}, everything else kept.${writable}`
   }
 
   /**
@@ -1099,6 +1149,21 @@ export function apply(ctx, config) {
       )
     }
 
+    if (verb === 'lock') {
+      const value = parseSwitch(tokens[0])
+      if (value === undefined) return result(agent, 'error', `用法 / usage: /${COMMAND} lock on|off`)
+      const saved = await saveConfig((current) => ({ ...current, lockAfterStart: value }))
+      if (!saved.saved) return result(agent, 'error', `没能保存设置 / Could not save the lock setting: ${saved.reason}`)
+      return result(
+        agent,
+        'success',
+        value
+          ? '会话开始后锁定联网开关：新会话仍可切换，已经开始的会话不再允许改。/ The switch locks once a Session starts: new Sessions can still toggle, running ones cannot.'
+          : '允许在已经开始的会话里切换联网开关（此时「隐藏」会按「调用时拒绝」执行，以保住缓存）。/ The switch may change mid-Session; tools set to hide are refused per call instead, so the cached prompt prefix stays intact.',
+        diagnostics(),
+      )
+    }
+
     // Everything below edits one tool's mode. `keep <tool> on|off` and
     // `allow add|remove <tool>` are the older spellings and stay aliases.
     const action = (tokens[0] ?? '').toLowerCase()
@@ -1166,7 +1231,8 @@ export function apply(ctx, config) {
       requested === 'tools' ||
       requested === 'mode' ||
       requested === 'keep' ||
-      requested === 'allow'
+      requested === 'allow' ||
+      requested === 'lock'
     ) {
       if (agent?.session?.id === undefined) {
         return { kind: 'error', text: '没有可配置的会话 / No Session to configure.' }
@@ -1186,6 +1252,13 @@ export function apply(ctx, config) {
         kind: 'error',
         text: `用法 / usage: /${COMMAND} [on|off|status] | /${COMMAND} tools | /${COMMAND} mode <tool> keep|hide|inspect|refuse [--global] | /${COMMAND} surface <plugin|settings|composer> on|off`,
       }
+    }
+    if (lockActive(agent)) {
+      return result(
+        agent,
+        'error',
+        '本会话已经开始，联网开关已锁定：请新开一个会话，或在设置里关掉「会话开始后锁定开关」 / This Session has already started, so its switch is locked. Start a new Session, or turn off "lock the switch after the Session starts" in the settings.',
+      )
     }
     const current = isOff(agent)
     const next = requested === '' ? !current : requested === 'off'
@@ -1212,7 +1285,7 @@ export function apply(ctx, config) {
   ctx.commands.register({
     name: COMMAND,
     description: 'Turn this Session\'s network tools off, and decide per tool what the switch keeps, hides, inspects, or refuses.',
-    input: { hint: 'on|off|status|tools|mode <tool> keep|hide|inspect|refuse [--global]|mode reset [--global]|surface <plugin|settings|composer> on|off' },
+    input: { hint: 'on|off|status|tools|mode <tool> keep|hide|inspect|refuse [--global]|mode reset [--global]|surface <plugin|settings|composer> on|off|lock on|off' },
     handler: ({ agent, rawInput }) => toggle(agent, rawInput),
   })
 }

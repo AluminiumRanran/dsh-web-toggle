@@ -90,7 +90,7 @@
 ## 相关实现
 
 - `index.js`：`/webtoggle` 命令（含 `config` / `surface` / `tools` / `mode` / 旧别名 `keep`、`allow`）、`Config` 六个 volatile 字段、`restrictableOf()` 探针式目录、`openRestriction()` 收窄重试、`defaultMode()` / `modeOf()` / `splitByMode()`、`retune()` 换模式、`tools.guard()` 内容检查、请求序列重建、会话销毁清理。
-- `client.js`：三个槽位组件（输入框开关 + 小箭头浮层、设置页、插件详情页）、共用面板 `PanelView`（三态循环按钮）、乐观更新 `planOf` / `applyPlan`、按会话铭记的显示状态、`commands.execute` 调用。
+- `client.js`：三个槽位组件（输入框开关 + 小箭头浮层、设置页、插件详情页）、共用面板 `PanelView`（四态循环按钮）、乐观更新 `planOf` / `applyPlan`、按会话铭记的显示状态、`commands.execute` 调用。
 
 ## 拒绝文案为什么写成指令
 
@@ -133,6 +133,15 @@
 - 面板写 `settings` 服务里本插件那一行配置（`ctx.remote.settings.describe/mutate`，`ns` 就是 profile 里这一行的 id `web-toggle`）。
 - 宿主在 `agent/pre-step` 开头调 `reconcile(agent)`：配置说这个会话关着、而运行时还开着，就当场装 `restrict()` + `guard()`；反过来就撤掉。变化照旧塞 `pendingSeries`，pre-step 把它翻成 `startsRequestSeries`。
 - 面板要画的**完整工具列表**由宿主每轮写进配置字段 `knownTools`（目录变了才写），客户端读配置画，因此浏览工具也不需要命令、不会产生回执。缓存（localStorage）只作为首屏兜底。
-- 唯一会留在聊天里的是：输入框手敲的命令，和面板里的**刷新**按钮（它真的跑一次 `tools --json`）。
+- 唯一会留在聊天里的是：输入框手敲的命令。面板里的「刷新」也只是重新 `describe` 一次配置（宿主每轮已把目录写进 `knownTools`），同样零回执。
 
 这条边界值得记住：**能读配置的地方绝不发命令**。按钮 → 配置 → pre-step → `restrict`/`guard`，是一条不产生用户可见日志的链路。
+
+## 0.6.0：会话开始后锁定开关、隐藏降级为运行时拒绝
+
+会话一开始，插件就把这个 session 记进配置 `startedSessions`（在 `agent/pre-step` 的 `enter` 分支里记，记过不重写），于是有了两条新行为：
+
+1. **隐藏降级**：`splitByMode(agent)` 在 `started === true` 时把本该进 `deny` 的名字挪进 `refuse`。工具表因此保持不变——这一轮的工具声明和上一轮一样，提示词缓存的前缀不动，代价最小。真正想让工具消失，得在新会话里就配好 `hide`，或者关掉锁。
+2. **开关锁**：`lockAfterStart`（默认 `true`）打开时，`toggle` 的 `on`/`off`/无参分支第一句就检查 `lockActive(agent)`，命中直接回错误；面板上的按钮是灰的（`disabled` + `title` 提示），但仍能改模式、改显示位置（那些不动联网状态）。`reconcile()` 在锁定时也**不硬改运行时**：若配置与运行时不一致（例如别处改了配置），它把配置写回运行时的真值再返回——面板不会显示一个没生效的开关。
+
+`offSessions` / `startedSessions` / `knownTools` 都是 volatile 字段，写在配置里、`appliedOff` 只在内存里——重启 DSH 之后，配置说关着的会话在下一轮 pre-step 会被 `reconcile` 重新装上限制，不需要先点一次开关。

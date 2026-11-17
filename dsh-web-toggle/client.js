@@ -200,6 +200,12 @@ window.__ModuleLoader__.load({
         'panel.builtIn': 'built-in',
         'panel.cycle': 'Click to switch this tool to the next mode',
         'panel.alwaysOn': 'always shown',
+        'panel.lockAfterStart': 'Lock the switch after a Session starts',
+        'panel.lockAfterStartHint': 'A conversation that already exists keeps its tool list. Leave this on: once the first turn has run, the on/off switch is locked, so a running conversation never loses its cached prompt prefix. Turn it off to allow switching mid-conversation — tools set to hide are then refused per call instead.',
+        'panel.lockedHint': 'This Session has already started, so the switch is locked. Start a new Session, or turn off "Lock the switch after a Session starts" in the settings.',
+        'panel.startedHint': 'This Session has started: tools set to hide are enforced as refuse-per-call, so the cached prompt prefix survives.',
+        'panel.on': 'on',
+        'panel.off': 'off',
         'panel.add': 'Add',
         'panel.placeholder': 'tool name, for example read',
         'panel.empty': 'Nothing extra yet.',
@@ -264,6 +270,12 @@ window.__ModuleLoader__.load({
         'panel.builtIn': '内置',
         'panel.cycle': '点一下切到下一种模式',
         'panel.alwaysOn': '始终显示',
+        'panel.lockAfterStart': '会话开始后锁定开关',
+        'panel.lockAfterStartHint': '已经存在的对话会保留它的工具表。保持开启：第一轮跑过之后，联网开关就锁住，正在进行的对话不会因为改工具表而丢掉提示词缓存。关掉之后允许中途切换，但「隐藏」会按「调用时拒绝」执行，缓存前缀仍然不动。',
+        'panel.lockedHint': '本会话已经开始，开关已锁定。新开一个会话，或在设置里关掉「会话开始后锁定开关」。',
+        'panel.startedHint': '本会话已经开始：设为「隐藏」的工具按「调用时拒绝」执行，以保住提示词缓存。',
+        'panel.on': '开',
+        'panel.off': '关',
         'panel.add': '添加',
         'panel.placeholder': '工具名，例如 read',
         'panel.empty': '还没有额外保留的工具。',
@@ -498,6 +510,11 @@ window.__ModuleLoader__.load({
         if (value === undefined) return null
         return { kind: 'surface', key: action, value }
       }
+      if (head === 'lock') {
+        const value = switchOf(tokens[0])
+        if (value === undefined) return null
+        return { kind: 'lock', value }
+      }
       if (head === 'mode') {
         if (action === 'reset' || action === 'clear') return { kind: 'reset', global }
         const name = tokens[0]
@@ -660,6 +677,10 @@ window.__ModuleLoader__.load({
           global: modesIn(value.toolModes),
           session: sessionId === undefined ? {} : modesIn(sessionModes[sessionId]),
           writable: writable !== false,
+          // 会话是否已经跑过一轮：决定开关还能不能切，以及「隐藏」是否已降级成运行时拒绝。
+          started: sessionId !== undefined && value.startedSessions !== null && typeof value.startedSessions === 'object' && value.startedSessions[sessionId] === true,
+          locked: sessionId !== undefined && value.startedSessions !== null && typeof value.startedSessions === 'object' && value.startedSessions[sessionId] === true && value.lockAfterStart !== false,
+          lockAfterStart: value.lockAfterStart !== false,
         }
       }
 
@@ -699,6 +720,10 @@ window.__ModuleLoader__.load({
           if (field === undefined) return []
           // 默认就是显示：显示＝去掉这个键，隐藏＝写 false。
           return [plan.value ? { op: 'unset', path: [field] } : { op: 'set', path: [field], value: false }]
+        }
+        if (plan.kind === 'lock') {
+          // 默认就是锁：锁定＝去掉这个键，解锁＝显式写 false。
+          return [plan.value ? { op: 'unset', path: ['lockAfterStart'] } : { op: 'set', path: ['lockAfterStart'], value: false }]
         }
         if (plan.kind === 'reset') {
           return [plan.global ? { op: 'unset', path: ['toolModes'] } : { op: 'unset', path: ['sessionModes', sessionId] }]
@@ -772,6 +797,8 @@ window.__ModuleLoader__.load({
         const disabled = props.busy === true
         const writable = state === null || state === undefined ? true : state.writable !== false
         const surfaces = state?.surfaces ?? liveSurfaces
+        const locked = state?.locked === true
+        const lockOn = state?.lockAfterStart !== false
         const catalogue = Array.isArray(props.catalogue) ? props.catalogue : []
         const needle = filter.trim().toLowerCase()
         // 三态循环的顺序：保留 → 隐藏 → 内容检查 → 保留。
@@ -818,11 +845,13 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'dswt-btn',
                     'data-primary': 'true',
-                    disabled,
+                    disabled: disabled || locked,
+                    title: locked ? t('panel.lockedHint') : undefined,
                     onClick: () => props.onRun(state?.off ? 'on' : 'off'),
                   },
                   state?.off ? t('panel.switchOn') : t('panel.switchOff'),
                 ),
+                locked ? h('div', { className: 'dswt-hint' }, t('panel.lockedHint')) : null,
               ),
           h(
             'div',
@@ -883,6 +912,7 @@ window.__ModuleLoader__.load({
                     ),
                   ),
                 ),
+            state?.started === true ? h('div', { className: 'dswt-hint' }, t('panel.startedHint')) : null,
             h('div', { className: 'dswt-hint' }, t('panel.hint.keep')),
           ),
           h(
@@ -892,6 +922,25 @@ window.__ModuleLoader__.load({
             surfaceRow('plugin', 'panel.surface.plugin'),
             surfaceRow('settings', 'panel.surface.settings'),
             surfaceRow('composer', 'panel.surface.composer'),
+            global
+              ? h(
+                  'div',
+                  { className: 'dswt-row' },
+                  h('span', { title: t('panel.lockAfterStartHint') }, t('panel.lockAfterStart')),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dswt-btn',
+                      disabled: disabled || !writable,
+                      'aria-pressed': lockOn ? 'true' : 'false',
+                      title: t('panel.lockAfterStartHint'),
+                      onClick: () => props.onRun(`lock ${lockOn ? 'off' : 'on'}`),
+                    },
+                    lockOn ? t('panel.on') : t('panel.off'),
+                  ),
+                )
+              : null,
           ),
           h('div', { className: 'dswt-hint' }, global ? t('panel.hint.global') : t('panel.hint.session')),
           writable ? null : h('div', { className: 'dswt-hint dswt-error' }, t('panel.hint.readonly')),
@@ -1193,6 +1242,23 @@ window.__ModuleLoader__.load({
           })
         }
 
+        // 挂载时静默读一次配置：开关的位置、会话是否已开始、是否被锁，都能立刻画准。
+        // 这是读配置（settings.describe），不是命令，所以聊天里不会多一条回执。
+        useEffect(() => {
+          if (sessionId === undefined) return undefined
+          let cancelled = false
+          void run(sessionId, 'status', t).then((outcome) => {
+            if (cancelled || !aliveRef.current) return
+            if (outcome.state === undefined) return
+            setPanel(outcome.state)
+            publishSurfaces(outcome.state.surfaces)
+            commit(outcome.state.off === true)
+          })
+          return () => {
+            cancelled = true
+          }
+        }, [sessionId])
+
         /** Open the popover, asking the Host for the state and the catalogue it draws. */
         const openPanel = () => {
           const next = !open
@@ -1224,7 +1290,9 @@ window.__ModuleLoader__.load({
           })
         }
 
-        const title = running ? t('title.running') : off ? t('title.off') : t('title.on')
+        // 会话开始后开关默认锁着：按钮变灰并在 title 里说清楚为什么（面板里还能看到细节）。
+        const locked = panel?.locked === true
+        const title = running ? t('title.running') : locked ? t('panel.lockedHint') : off ? t('title.off') : t('title.on')
         // The caret follows the configuration; hiding it hands this Session's list to the
         // configuration pages, which stay reachable either way.
         const showCaret = surfaces.composer !== false
@@ -1240,7 +1308,7 @@ window.__ModuleLoader__.load({
               'aria-pressed': off ? 'false' : 'true',
               'aria-label': t('group.aria'),
               title: busy ? t('title.running') : title,
-              disabled: busy || running,
+              disabled: busy || running || locked,
               onMouseDown: (event) => event.preventDefault(),
               onClick: toggle,
             },

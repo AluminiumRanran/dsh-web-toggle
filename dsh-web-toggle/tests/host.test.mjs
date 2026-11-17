@@ -429,6 +429,8 @@ function makeConfigCtx(initial = {}) {
     sessionModes: {},
     offSessions: {},
     knownTools: [],
+    lockAfterStart: true,
+    startedSessions: {},
     debug: true,
     ...initial,
   }
@@ -717,7 +719,9 @@ function makeConfigCtx(initial = {}) {
 
 // 17. 配置即状态：面板写进 offSessions 的开关，在下一轮请求前自动落到工具表上
 {
-  const { ctx: configCtx, listeners: configListeners, values, config } = makeConfigCtx({ offSessions: { cfg1: true } })
+  // 这一组专门测「配置推着运行时走」，所以把「开始后锁开关」关掉：锁着的话下面的
+  // 「配置改回联网」本来就该被拒，那是第 18 组的事。
+  const { ctx: configCtx, listeners: configListeners, values, config } = makeConfigCtx({ offSessions: { cfg1: true }, lockAfterStart: false })
   apply(configCtx, config)
   const preStep = configListeners.get('agent/pre-step')
   assert.equal(typeof preStep, 'function', '应监听 agent/pre-step')
@@ -745,6 +749,54 @@ function makeConfigCtx(initial = {}) {
   await new Promise((resolve) => setImmediate(resolve))
   assert.ok(Array.isArray(values.knownTools) && values.knownTools.includes('web_search'), '目录要记进配置')
   console.log('17 配置即状态（自动下发 / 自动撤销） ok')
+}
+
+// 18. 会话开始后：开关默认上锁；解锁后「隐藏」自动降级成「调用时拒绝」（保住缓存）
+{
+  const { ctx: lockCtx, commands: lockCommands, listeners: lockListeners, values, config } = makeConfigCtx()
+  apply(lockCtx, config)
+  const run = lockCommands.get('webtoggle').handler
+  const preStep = lockListeners.get('agent/pre-step')
+  const decision = { kind: 'enter', messages: [{ role: 'user' }] }
+  const tick = () => new Promise((resolve) => setImmediate(resolve))
+
+  // 还没开始的会话：开关照常能切（用一个独立的 agent，免得和下面那轮互相影响）。
+  const fresh = makeAgent('lk0')
+  const early = await run({ agent: fresh.agent, rawInput: 'off' })
+  assert.equal(early.kind, 'success', '第一轮之前可以切')
+  await tick()
+
+  // 跑完一轮：这个 Session 就算「已经开始」，并记进配置。
+  const { agent, restrictions, guards } = makeAgent('lk1')
+  const step = () => preStep({ agent, signal: { aborted: false } }, async () => decision)
+  await step()
+  await tick()
+  assert.equal(values.startedSessions.lk1, true, '轮次一开始就要记下会话已开始')
+
+  // 默认锁着：命令拒绝，runtime 不动。
+  const locked = await run({ agent, rawInput: 'off' })
+  assert.equal(locked.kind, 'error', '已开始的会话默认不允许切开关')
+  assert.match(locked.text, /已锁定|locked/, '错误里要说清是锁住了')
+  assert.equal(restrictions.length, 0, '被拒绝时不该装限制')
+
+  // 面板绕开命令直接写配置：pre-step 也不认，并把配置改回运行时真值。
+  values.offSessions = { lk1: true }
+  await step()
+  await tick()
+  assert.equal(restrictions.length, 0, '锁着时配置写进来的 off 不该生效')
+  assert.equal(values.offSessions.lk1, undefined, '配置要恢复成运行时的样子，面板才不会撒谎')
+
+  // 在设置里解锁：之后允许在已开始的会话里切，但「隐藏」降级为「调用时拒绝」。
+  const unlocked = await run({ agent, rawInput: 'lock off' })
+  assert.equal(unlocked.kind, 'success', 'lock off 应能保存')
+  assert.equal(values.lockAfterStart, false)
+  const after = await run({ agent, rawInput: 'off' })
+  assert.equal(after.kind, 'success', '解锁后可以切')
+  assert.equal(restrictions.length, 0, '已开始的会话不再用 deny 改工具表')
+  assert.equal(guards.length, 1, '改用 guard 在调用时拒绝')
+  assert.match((await run({ agent, rawInput: 'status' })).text, /\[web:off\]/, '状态仍是断网')
+
+  console.log('18 开始后锁开关 / 隐藏降级为运行时拒绝 ok')
 }
 
 console.log('\n全部通过')

@@ -288,6 +288,8 @@ function fakeHost(initial = {}) {
       sessionModes: Object.keys(state.session).length === 0 ? {} : { s1: { ...state.session } },
       knownTools: [...CATALOGUE].sort(),
       offSessions,
+      lockAfterStart: state.lockAfterStart !== false,
+      startedSessions: state.started === true ? { s1: true } : {},
     }
   }
   const applyOps = (ops) => {
@@ -296,6 +298,7 @@ function fakeHost(initial = {}) {
       const path = op.path.join('/')
       if (path === 'composerPanel') state.surfaces.composer = op.value === true
       else if (path === 'settingsSection') state.surfaces.settings = op.value === true
+      else if (path === 'lockAfterStart') state.lockAfterStart = op.op === 'set' ? op.value : true
       else if (path.startsWith('offSessions/')) state.off = op.value === true
       else if (path.startsWith('toolModes/')) {
         const name = op.path[1]
@@ -514,22 +517,22 @@ function expand(node) {
   storages.clear()
   globalThis.localStorage.setItem('dsh-web-toggle:off:s5', '1')
   const first = mount('s5')
-  const host = stubSettings([], { off: true, sessionId: 's5' })
+  const written = []
+  const host = stubSettings(written, { off: true, sessionId: 's5' })
   first.state.remote = host.remote
   first.render()
   flushTimers()
   await settle()
   assert.equal(host.state.revision, 1, '探针不该写配置')
 
-  // 模拟切到别的会话再切回来：组件重新挂载，模块级缓存还在
-  let describes = 0
-  const watched = { ...host.remote, settings: { ...host.remote.settings, describe: async () => (describes++, host.remote.settings.describe()) } }
+  // 模拟切到别的会话再切回来：组件重新挂载。现在挂载时只读一次配置（静默），
+  // 不再有「探测」这一步，所以既不会多一条命令回执，也不会再弹提示。
   const second = mount('s5')
-  second.state.remote = watched
+  second.state.remote = host.remote
   const tree = second.render()
   flushTimers()
   await settle()
-  assert.equal(describes, 0, '同一页面内不应重复探测')
+  assert.equal(written.length, 0, '读配置不该写任何东西')
   assert.equal(tree.props['data-off'], 'true')
   assert.equal(noteOf(tree), undefined, '不应再次弹提示')
   console.log('5 切走切回不重复提示 ok')
@@ -737,10 +740,13 @@ function expand(node) {
   assert.equal(tree, null, '关掉之后这个页面自己也不画了')
 
   // 换个入口把它重新打开：输入框面板底部的三行开关里点「显示」
-  const reopened = fakeHost({ global: { ops_bash: 'keep' } })
+  const reopened = fakeHost({ global: { ops_bash: 'keep' }, surfaces: { plugin: true, settings: false, composer: true } })
   page.state.remote = reopened.remote
   const composerAgain = mount('s11')
   let composerTree = composerAgain.render()
+  // 挂载后会静默读一次配置（决定小箭头显不显示），所以先让它落定再点。
+  await settle()
+  composerTree = composerAgain.render()
   queryAll(composerTree, 'dswt-caret')[0].props.onClick()
   await settle()
   composerTree = composerAgain.render()
@@ -834,6 +840,46 @@ function expand(node) {
   await settle()
   assert.ok(page.state.slots['conversation.input.left'] !== undefined, '打开后槽位要回来')
   console.log('14 入口真卸载 / 详情页常开 ok')
+}
+
+// 15. 会话开始后：开关锁定（按钮禁用），设置页能解锁
+{
+  storages.clear()
+  const host = fakeHost({ started: true })
+  page.state.remote = host.remote
+
+  // 输入框旁的开关：静默读到 locked 之后禁用，并说明原因。
+  const composer = mount('s1')
+  let tree = composer.render()
+  await settle()
+  tree = composer.render()
+  tree = composer.render()
+  const trigger = queryAll(tree, 'dswt-trigger')[0]
+  assert.equal(trigger.props.disabled, true, '锁着时开关不可点')
+  assert.match(trigger.props.title, /锁定|locked/i, 'title 要说清为什么不能点')
+  assert.equal(host.state.commands.length, 0, '读配置不产生命令回执')
+
+  // 设置页：多出「会话开始后锁定开关」一行，默认是开的。
+  const settings = mountPage('settings.section')
+  let pageTree = settings.render()
+  await settle()
+  pageTree = settings.render()
+  pageTree = pageTree === null ? settings.render() : pageTree
+  const lockRow = queryAll(pageTree, 'dswt-row').find((row) => textOf(row).includes(settings.t('panel.lockAfterStart')))
+  assert.ok(lockRow !== undefined, '设置页要有「会话开始后锁定开关」这一行')
+  const lockButton = buttonWith(lockRow, settings.t('panel.on'))
+  assert.ok(lockButton !== undefined, '默认显示为「开」')
+  assert.equal(lockButton.props['aria-pressed'], 'true')
+  lockButton.props.onClick()
+  await settle()
+  const ops = lastOps(host)
+  assert.ok(
+    ops.some((op) => op.path.join('/') === 'lockAfterStart' && op.op === 'set' && op.value === false),
+    '点一下写进配置（默认值是锁定，所以解锁要显式写 false）',
+  )
+  assert.equal(host.state.commands.length, 0, '点按钮仍然不碰命令线')
+
+  console.log('15 会话开始后锁开关（面板 / 设置页） ok')
 }
 
 console.log('\n全部通过')

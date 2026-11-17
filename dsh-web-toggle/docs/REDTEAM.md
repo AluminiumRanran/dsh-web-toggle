@@ -213,6 +213,8 @@ echo 'GET / HTTP/1.1'       # 放行
 
 ## 声明
 
+从 0.6.0 起，**会话已经开始之后 `hide` 会按 `refuse` 执行**：这是为了不改工具列表、不打断提示词缓存。代价是模型仍看得见这些工具、仍可能尝试调用——只是每次都会被拒。想要「看不见也调不到」，请在新会话里预先配好 `hide`，或者把 `lockAfterStart` 关掉再切。
+
 本插件使用 AI 辅助完成（设计、实现、测试与文档均由人和 AI 协作产出）。本节的红队记录由用户侧执行，结论原样保留，包括仍然拦不住的部分。
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)

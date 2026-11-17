@@ -90,7 +90,9 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 
 ## 0.5.2 追加
 
-- [x] `node tests/host.test.mjs`：17 组通过（新增第 17 组：配置说关 → pre-step 自动装限制并重建请求序列；配置改回开 → 自动撤销；目录写进 `knownTools`）。
-- [x] `node tests/client.test.mjs`：14 组通过（按钮全部改走 `settings.describe/mutate`，断言"命令线一次都没被调用"）。
-- [ ] 真机：刷新客户端后点开关 / 切模式，聊天里**不应**出现新的 `> webtoggle` 回执；点「刷新」应出现一条。
+- [x] `node tests/host.test.mjs`：18 组通过（第 17 组：配置说关 → pre-step 自动装限制并重建请求序列、配置改回开 → 自动撤销、目录写进 `knownTools`；第 18 组：会话开始后 `hide` 进 `refuse`、开关被锁、`lock off` 后解锁、`reconcile` 在锁定时把配置写回真值）。
+- [x] `node tests/client.test.mjs`：15 组通过（按钮全部改走 `settings.describe/mutate`，断言"命令线一次都没被调用"；第 15 组：会话已开始时开关禁用、设置页出现锁行、点击写 `lockAfterStart: false`）。
+- [ ] 真机：刷新客户端后点开关 / 切模式 / 点「刷新」，聊天里**都不应**出现新的 `> webtoggle` 回执；只有手敲 `/webtoggle …` 才有。
 - [ ] 真机：宿主重启后，配置里关着的会话在第一轮请求前就被断网（不需要先点一次开关）。
+- [ ] 真机：会话发过言之后，面板里的开关变灰、提示「本会话已经开始」；新开会话则正常。
+- [ ] 真机：会话开始后点灭（先 `/webtoggle off` 前若未锁），工具表**不应**变化（`hide` 已按 `refuse` 执行，日志里工具数不变）。
