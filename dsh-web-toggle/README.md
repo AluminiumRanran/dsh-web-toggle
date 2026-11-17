@@ -29,19 +29,22 @@
 
 ## 它挡什么、不挡什么
 
-挡住（关掉时隐藏）：`web_search`、`web_fetch`、`ops_bash`、浏览器工具（`bsk_*`）、`computer_*`、全部 `mcp__*` 与 `read_mcp_resource` / `list_mcp_resources`、`video_*`、`workbuddy_*`、`subagent` / `subagent_fork` / `workflow` / `send_message`、`plugin_manager`、`schedule_create` / `schedule_edit`。
+**留下、但加命令过滤**：`ops_bash`。跑本地命令（构建、测试、搬文件）照常；命令里出现 `curl` / `wget` / `ssh` / `git clone` / `pnpm add` / `pip install` / `http(s)://` / UNC 共享之类，执行前就被 `tools.guard()` 拦下并说明原因。这样本地活不断，出网的口子收紧。
 
-留下（都是纯本地）：文件读写与检索、上下文/记忆、计划与目标、技能、`job_*` 查看与终止、`schedule_list` / `schedule_view`、`present`、`ask_user_question` 等。
+**隐藏**：`web_search`、`web_fetch`、浏览器工具（`bsk_*`）、`computer_*`（能驱动浏览器看网页）、全部 `mcp__*` 与 `read_mcp_resource` / `list_mcp_resources`、`video_*`、`workbuddy_*`、`subagent` / `subagent_fork` / `workflow` / `send_message`（子代理是新的 Agent，遮罩不跟过去）、`plugin_manager`（装包=下载）、`schedule_create` / `schedule_edit`（会安排另一个会话去联网）。
 
-挡住不了的三件事，如实写在这里：
+**留下（纯本地，不设防）**：文件读写与检索、上下文/记忆、计划与目标、技能、`job_*` 查看与终止、`schedule_list` / `schedule_view`、`present`、`ask_user_question` 等。
 
-1. **关之前已经跑起来的后台任务不会自动断**。比如你先前用 `ops_bash` 起的 `curl` 还在跑，它继续用网。关掉开关后可以用 `job_list` + `job_kill` 收尾。
-2. **`run_code` 是内核保留名字**，`tools.restrict()` 不接受它，所以 PTC 模式下它仍可见；它自身不能直接联网（脚本里没有网络 API），但它能起的子代理是否受限取决于内核。
-3. **它不是网络层的墙**。DSH 没有"按会话断网"的内核能力（`dsh-sandbox-local` 只做文件系统约束，没有网络规则）。真要在系统层面断绝，只能在无网 VM/容器里跑 DSH——那不是插件能做的事。
+挡住不了的四件事，如实写在这里：
+
+1. **shell 过滤是按字面匹配的**。它挡的是明显的联网命令，挡住不了精心伪装的（base64、把脚本先写到本地再执行、自定义二进制）。要"一个字节都不许出"，关掉 shell 更干脆——但那也意味着这一轮跑不了测试和构建。
+2. **关之前已经跑起来的后台任务不会自动断**。比如先前起的 `curl` 还在跑，它继续用网。用 `job_list` + `job_kill` 收尾。
+3. **`run_code` 是内核保留名字**，`tools.restrict()` 不接受它，所以 PTC 模式下它仍可见；它自身没有网络 API，但能起的子代理是否受限取决于内核。
+4. **它不是网络层的墙**。DSH 没有"按会话断网"的内核能力（`dsh-sandbox-local` 只约束文件系统，没有网络规则）。真要在系统层面断绝，只能在无网 VM/容器里跑 DSH——那不是插件能做的事。
 
 ## 性能
 
-几乎为零：Host 半侧只在切换时读一次工具目录（约 100 个名字的过滤），平日只有两个事件监听器；每次 admitted step 只做一次 `Set.has`。客户端是一个小组件，只在状态变化时渲染；没有轮询、没有定时器（唯一的 0ms 定时器只在"浏览器记着关"时问一次宿主）。
+几乎为零：Host 半侧只在切换时读一次工具目录（约 100 个名字的过滤），平日只有两个事件监听器；每次 admitted step 只做一次 `Set.has`；断网期间每次工具调用多一次正则判断（只针对 `ops_bash` 的 command 字符串）。客户端是一个小组件，只在状态变化时渲染；没有轮询、没有定时器（唯一的 0ms 定时器只在"浏览器记着关"时问一次宿主）。
 
 ## 已知边界
 

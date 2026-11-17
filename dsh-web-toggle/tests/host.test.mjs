@@ -93,11 +93,18 @@ function makeCtx() {
 function makeAgent(id, { running = false } = {}) {
   const restrictions = []
   const disposals = []
+  const guards = []
+  const guardDisposals = []
   const agent = {
     status: running ? 'running' : 'idle',
     session: { id },
     ctx: {
       tools: {
+        guard(fn) {
+          guards.push(fn)
+          guardDisposals.push('registered')
+          return () => guardDisposals.push('lifted')
+        },
         restrict(filter) {
           // 关闭 = 白名单：只给 allow，不给 deny。
           assert.equal(filter.deny, undefined, '关闭应使用 allow 白名单，而不是 deny 少数工具')
@@ -117,7 +124,7 @@ function makeAgent(id, { running = false } = {}) {
       },
     },
   }
-  return { agent, restrictions, disposals }
+  return { agent, restrictions, disposals, guards, guardDisposals }
 }
 
 const { ctx, commands, listeners } = makeCtx()
@@ -244,7 +251,6 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
   call(agent, 'off')
   const allow = new Set(restrictions[0].allow)
   for (const name of [
-    'ops_bash',
     'web_search',
     'web_fetch',
     'bsk_page',
@@ -263,13 +269,46 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
   ]) {
     assert.equal(allow.has(name), false, `断网后不应保留 ${name}`)
   }
-  for (const name of ['ops_inspect_local_file', 'ops_glob', 'ops_grep', 'write', 'edit', 'todo_write', 'present', 'remember']) {
+  for (const name of ['ops_bash', 'ops_inspect_local_file', 'ops_glob', 'ops_grep', 'write', 'edit', 'todo_write', 'present', 'remember']) {
     assert.equal(allow.has(name), true, `断网后应保留本地工具 ${name}`)
   }
   assert.equal(allow.has('read'), false, '未列入白名单的工具默认隐藏（fail closed）')
   assert.equal(allow.has('acp_cache'), false, '目录里没有的名字应被过滤，而不是让 restrict 抛错')
   assert.equal(allow.has('schedule_list'), true, '只读的计划查询属于本地工具')
   console.log('11 白名单内容 ok')
+}
+
+// 12. 双用途工具（ops_bash）留着，但联网命令被 guard 拦下
+{
+  const { agent, guards, guardDisposals } = makeAgent('s13')
+  call(agent, 'off')
+  assert.equal(guards.length, 1, '关闭时应注册一个 guard')
+  const guard = guards[0]
+  const bash = (command) => guard({ name: 'ops_bash', arguments: { command } })
+
+  for (const command of [
+    'curl https://example.com',
+    'wget http://x/y.zip',
+    'git clone https://github.com/a/b',
+    'pnpm add lodash',
+    'pip install requests',
+    'node -e "require(\'https\').get(...)"',
+    'python -c "import urllib.request"',
+    'ssh user@host',
+    'Invoke-WebRequest http://x',
+    'robocopy . \\\\server\\share /E',
+  ]) {
+    assert.equal(typeof bash(command), 'string', `应拦下：${command}`)
+  }
+  for (const command of ['ls -la', 'node scripts/test.mjs', 'git status', 'npm test', 'python -c "print(1+1)"', 'rm -rf tmp/x', 'cat package.json']) {
+    assert.equal(bash(command), undefined, `不应拦下：${command}`)
+  }
+  assert.equal(guard({ name: 'write', arguments: { file_path: 'a' } }), undefined, '别的工具不受这个 guard 影响')
+  assert.equal(typeof guard({ name: 'ops_bash', arguments: {} }), 'string', '没有可检查的命令时按保守处理拒绝')
+
+  call(agent, 'on')
+  assert.deepEqual(guardDisposals, ['registered', 'lifted'], '恢复时应撤销 guard')
+  console.log('12 shell 命令过滤 ok')
 }
 
 console.log('\n全部通过')
