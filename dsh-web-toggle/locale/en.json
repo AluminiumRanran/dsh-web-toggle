@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Web tools switch",
+    "description": "Adds a per-task switch to the composer toolbar: turn it off and this task's model no longer sees web_search or web_fetch, turn it on and they come back. Other tasks are unaffected.",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -1,0 +1,11 @@
+# web-toggle bundle: one row that mounts the Host half and its browser half.
+#
+# Host half (index.js): registers /webtoggle and denies web_search / web_fetch for
+# one agent through the scope-bound tools.restrict(), keeping the exact disposer;
+# the first admitted step after a change restarts the request series so the new
+# tool catalog is not announced as deferred additions.
+# Browser half (client.js): registers the toggle into conversation.input.left and
+# drives it through the existing commands Remote.
+- insert:
+    - id: web-toggle
+      name: 'dsh-web-toggle'

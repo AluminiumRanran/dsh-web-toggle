@@ -1,0 +1,36 @@
+# dsh-web-toggle
+
+给 DSH 对话输入框工具栏加一个**按会话独立**的联网开关。
+
+- 亮着：本会话的模型可以调用 `web_search` / `web_fetch`。
+- 划掉：这两个工具从本会话的工具列表里消失（下一次请求生效）。
+- 再点一次恢复。其他会话不受影响。
+
+实现手段是 DSH 内核自带的 `agent.ctx.tools.restrict({ deny: [...] })` —— 这个调用是 **agent 作用域**的，返回精确的 disposer，因此限制天然按会话隔离。
+
+## 装法
+
+```bash
+# 在 profile 目录（C:\Users\Aluminium\.dsh\profiles\desktop）
+# 方式一：交给 DSH 插件管理器
+#   plugin_manager install_bundle target="file:E:/workspace/dsh-web-toggle-prompt-20261116/dsh-web-toggle"
+# 方式二：手动挂 file: 依赖并 pnpm install，然后把包名加进 dsh.profile.bundles
+```
+
+装完需要 DSH 重启一次（新的客户端模块要重新下发）。
+
+## 命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `/webtoggle` | 切换 |
+| `/webtoggle on` \| `off` | 显式开关（幂等） |
+| `/webtoggle status` | 只读状态 |
+
+## 已知边界
+
+- 任务正在执行时切换会被拒绝，等这一轮结束再点。
+- 只影响 `web_search` / `web_fetch`，不碰别的工具。
+- DSH 重启后 Host 侧状态重置；浏览器记着的状态会在挂载时向 Host 探一次并纠正显示。
+
+细节见 [docs/DETAIL.md](docs/DETAIL.md)。
