@@ -12,7 +12,7 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 `tests/host.test.mjs` 覆盖：
 
 1. 初始状态 = 开（`status` 回 `[web:on]`，不加限制）
-2. `off` 生效：调用一次 `agent.ctx.tools.restrict({ deny: ['web_search','web_fetch'] })`，结果带 `[web:off]`
+2. `off` 生效：调用一次 `agent.ctx.tools.restrict({ allow: [...本地工具] })`（只给 allow，不给 deny），结果带 `[web:off]`
 3. 重复 `off` / 无参来回不叠加限制（restrict 只调用一次）
 4. `on` 精确调用一次 disposer，重复 `on` 不再 dispose
 5. 无参切换 on ⇄ off
@@ -21,6 +21,7 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 8. 非法参数回 error
 9. `agent/disposed` 触发时撤销限制并清记录；同一 sessionId 的新 agent 回到"开"
 10. `agent/pre-step`：变化后下一步返回 `startsRequestSeries: true`，只消费一次；`signal.aborted` 的步骤不消费标记
+11. 白名单内容：`ops_bash` / `web_*` / `bsk_*` / `computer_*` / `mcp__*` / `video_*` / `workbuddy_*` / `subagent` / `workflow` / `plugin_manager` / `schedule_create` 全部不在 allow 里；本地文件类工具在；未列入白名单的本地工具（`read`）也被隐藏（fail closed）；目录里没注册的名字被过滤而不是抛错
 
 `tests/client.test.mjs` 覆盖：
 
@@ -48,7 +49,7 @@ node tests/client.test.mjs   # Browser 半侧组件，用极简 React 打桩 + �
 
 - [ ] 刷新页面（必要时重启 DSH）后，输入框工具栏出现「联网」按钮，没有斜线
 - [ ] 点一下：按钮变灭态，命令回执里带 `[web:off]`
-- [ ] 同会话下一轮：模型工具列表里 `web_search` / `web_fetch` 消失（问模型"你现在有哪些工具"，或让它联网试试）
+- [ ] 同会话下一轮：模型工具列表只剩本地工具（`web_*`、`ops_bash`、`bsk_*`、`mcp__*` 都消失），本地读写照常可用
 - [ ] 另一个会话的按钮仍是亮态，可以正常联网
 - [ ] 再点一下恢复，下一轮又能联网
 - [ ] 宿主控制台没有 `tools.restrict() requires a scoped context` / `names unknown global tool` 这类报错

@@ -6,6 +6,63 @@
 import assert from 'node:assert/strict'
 import { apply } from '../index.js'
 
+/** 假工具目录：本地工具 + 各种能出网的通道 + 一个未列入白名单的本地工具。 */
+const CATALOG = new Set([
+  // 本地
+  'acp_read_original_image',
+  'acp_status',
+  'ask_user_question',
+  'compress',
+  'create_goal',
+  'create_skill',
+  'create_worktree',
+  'decompress',
+  'edit',
+  'get_goal',
+  'job_kill',
+  'job_list',
+  'job_output',
+  'list_agents',
+  'list_subagent_models',
+  'load_workspace_dependencies',
+  'ops_discover_tools',
+  'ops_glob',
+  'ops_grep',
+  'ops_inspect_local_file',
+  'present',
+  'read_animation',
+  'read_image',
+  'remember',
+  'schedule_list',
+  'schedule_view',
+  'search_context',
+  'skill',
+  'switch_session_preset',
+  'todo_write',
+  'update_goal',
+  'working_directory',
+  'write',
+  // 能出网 / 能驱动别人出网
+  'bsk_page',
+  'bsk_session',
+  'computer_ctrl',
+  'mcp__snowluma__qq_send_message',
+  'ops_bash',
+  'plugin_manager',
+  'read_mcp_resource',
+  'schedule_create',
+  'send_message',
+  'subagent',
+  'subagent_fork',
+  'video_probe',
+  'web_fetch',
+  'web_search',
+  'workbuddy_draw_image',
+  'workflow',
+  // 未列入白名单的本地工具：必须一并隐藏（fail closed）
+  'read',
+])
+
 /** 造一个能被 apply 接受的 ctx，并记录注册过的命令与监听器。 */
 function makeCtx() {
   const commands = new Map()
@@ -18,6 +75,11 @@ function makeCtx() {
     },
     agents: {
       turnBoundaryOf: () => ({ openTurnStartSeq: null }),
+    },
+    tools: {
+      // 本部署的工具目录：既含本地工具，也含各种能出网的工具；'read' 是未列入白名单的
+      // 本地工具，'acp_cache' 故意不注册，用来验证"只保留目录里真实存在的名字"。
+      view: () => ({ restrictableNames: CATALOG }),
     },
     on(event, listener) {
       listeners.set(event, listener)
@@ -37,7 +99,12 @@ function makeAgent(id, { running = false } = {}) {
     ctx: {
       tools: {
         restrict(filter) {
-          assert.deepEqual([...filter.deny], ['web_search', 'web_fetch'])
+          // 关闭 = 白名单：只给 allow，不给 deny。
+          assert.equal(filter.deny, undefined, '关闭应使用 allow 白名单，而不是 deny 少数工具')
+          assert.ok(Array.isArray(filter.allow) && filter.allow.length > 0, 'allow 不能为空')
+          for (const name of filter.allow) {
+            assert.ok(CATALOG.has(name), `allow 里出现了目录中没有的工具：${name}`)
+          }
           restrictions.push(filter)
           let lifted = false
           const dispose = () => {
@@ -169,6 +236,40 @@ const call = (agent, rawInput) => command.handler({ agent, rawInput })
   const aborted = await preStep({ agent: running, signal: { aborted: true } }, async () => decision)
   assert.equal(aborted.startsRequestSeries, undefined, '被取消的步骤不消费标记')
   console.log('10 请求序列重建 ok')
+}
+
+// 11. 白名单内容：本地工具留下，能出网的一律隐藏，目录里没有的名字被过滤
+{
+  const { agent, restrictions } = makeAgent('s12')
+  call(agent, 'off')
+  const allow = new Set(restrictions[0].allow)
+  for (const name of [
+    'ops_bash',
+    'web_search',
+    'web_fetch',
+    'bsk_page',
+    'bsk_session',
+    'computer_ctrl',
+    'mcp__snowluma__qq_send_message',
+    'read_mcp_resource',
+    'video_probe',
+    'workbuddy_draw_image',
+    'subagent',
+    'subagent_fork',
+    'send_message',
+    'workflow',
+    'plugin_manager',
+    'schedule_create',
+  ]) {
+    assert.equal(allow.has(name), false, `断网后不应保留 ${name}`)
+  }
+  for (const name of ['ops_inspect_local_file', 'ops_glob', 'ops_grep', 'write', 'edit', 'todo_write', 'present', 'remember']) {
+    assert.equal(allow.has(name), true, `断网后应保留本地工具 ${name}`)
+  }
+  assert.equal(allow.has('read'), false, '未列入白名单的工具默认隐藏（fail closed）')
+  assert.equal(allow.has('acp_cache'), false, '目录里没有的名字应被过滤，而不是让 restrict 抛错')
+  assert.equal(allow.has('schedule_list'), true, '只读的计划查询属于本地工具')
+  console.log('11 白名单内容 ok')
 }
 
 console.log('\n全部通过')

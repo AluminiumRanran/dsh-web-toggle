@@ -1,10 +1,16 @@
 /**
- * Host half of the web-toggle bundle: a per-Session switch for the web tools.
+ * Host half of the web-toggle bundle: a per-Session network switch.
  *
- * Registers `/webtoggle [on|off|status]`. Turning the switch off denies
- * `web_search` and `web_fetch` for ONE agent through `agent.ctx.tools.restrict()`
- * (that call is scope-bound, so the restriction never leaks to another Session),
- * and keeps the exact disposer that lifts it. Turning it on calls that disposer.
+ * Registers `/webtoggle [on|off|status]`. Turning the switch off keeps ONLY the
+ * tools that cannot reach the network, through one `agent.ctx.tools.restrict()`
+ * call on that Agent (scope-bound, so it never leaks to another Session), and
+ * keeps the exact disposer that lifts it. Turning it on calls that disposer.
+ *
+ * Why an allowlist instead of denying `web_search`/`web_fetch`: those are only the
+ * official network tools. A shell can `curl`, a browser tool can open a page, an
+ * MCP server can forward a request. Keeping the local tools and hiding everything
+ * else is the only closed form: a tool a later plugin adds stays hidden until it
+ * is named here.
  *
  * The tool catalog changes under a live Session, so the next admitted step starts
  * a new request series: the recorded series can no longer describe the catalog,
@@ -18,8 +24,48 @@ export const inject = ['commands', 'agents', 'tools']
 /** The command name. */
 const COMMAND = 'webtoggle'
 
-/** The only tools this plugin may touch. */
-const TOOLS = ['web_search', 'web_fetch']
+/**
+ * The tools the switch leaves visible: every one of them only touches this machine.
+ * Files, search, planning, context bookkeeping, skills, jobs. Anything that can open
+ * a socket — `ops_bash`, the browser tools, MCP servers, media generation, sub-agents,
+ * the plugin manager, scheduled tasks — is deliberately absent, so "off" cannot leak.
+ */
+const LOCAL_TOOLS = [
+  'acp_cache',
+  'acp_read_original_image',
+  'acp_status',
+  'ask_user_question',
+  'compress',
+  'create_goal',
+  'create_skill',
+  'create_worktree',
+  'decompress',
+  'edit',
+  'get_goal',
+  'job_kill',
+  'job_list',
+  'job_output',
+  'list_agents',
+  'list_subagent_models',
+  'load_workspace_dependencies',
+  'ops_discover_tools',
+  'ops_glob',
+  'ops_grep',
+  'ops_inspect_local_file',
+  'present',
+  'read_animation',
+  'read_image',
+  'remember',
+  'schedule_list',
+  'schedule_view',
+  'search_context',
+  'skill',
+  'switch_session_preset',
+  'todo_write',
+  'update_goal',
+  'working_directory',
+  'write',
+]
 
 /** Short machine marker appended to every result text, so the browser half reads state without parsing prose. */
 const markerOf = (off) => `[web:${off ? 'off' : 'on'}]`
@@ -117,38 +163,49 @@ export function apply(ctx) {
       return {
         kind: 'success',
         text: changed
-          ? `联网工具已关闭：下一次请求起，本会话的模型看不到 web_search / web_fetch。 ${marker} / Web tools are off for this session.`
-          : `本会话的联网工具本来就是关闭的，没有重复加限制。 ${marker} / Web tools were already off for this session.`,
+          ? `已断网：从下一次请求起，本会话只剩本地工具，联网、下载、上传、浏览、MCP、子代理全部隐藏。 ${marker} / Network off for this session: only local tools remain from the next request.`
+          : `本会话本来就是断网状态，没有重复加限制。 ${marker} / The network was already off for this session.`,
       }
     }
     return {
       kind: 'success',
       text: changed
-        ? `联网工具已恢复：web_search / web_fetch 回到本会话的工具列表。 ${marker} / Web tools are back for this session.`
-        : `本会话的联网工具本来就是开启的，没有改动。 ${marker} / Web tools were already on for this session.`,
+        ? `已恢复联网：完整工具列表回到本会话。 ${marker} / Network restored for this session.`
+        : `本会话本来就是联网状态，没有改动。 ${marker} / The network was already on for this session.`,
     }
   }
 
   /**
-   * Deny the web tools for one Agent and arm the request-series rebuild.
+   * Hide every network-capable tool for one Agent and arm the request-series rebuild.
    * @param agent - the receiving Agent.
    * @returns the command result the UI renders.
    */
   function switchOff(agent) {
     const sessionId = agent.session.id
+    // The allowlist must only name tools this deployment actually registers: a name
+    // that is not in the catalog would make `restrict()` throw instead of narrowing.
+    // Read once per toggle — this is the only catalog-sized work the plugin ever does.
+    const known = safely(() => ctx.tools.view().restrictableNames)
+    const allow = known === undefined ? [] : LOCAL_TOOLS.filter((name) => known.has(name))
+    if (allow.length === 0) {
+      return {
+        kind: 'error',
+        text: '无法断网：本部署没有注册任何可保留的本地工具 / Could not switch off: none of the local tools are registered here.',
+      }
+    }
     // Arm BEFORE the restriction lands: if the restriction is resolvable while the
     // mark is missing, a request could describe the old catalog.
     pendingSeries.add(sessionId)
     let dispose
     try {
-      // Scope-bound: the deny applies to this Agent alone. Unknown names throw, which
-      // is the honest answer when the deployment composes no web tools at all.
-      dispose = agent.ctx.tools.restrict({ deny: TOOLS })
+      // Scope-bound: the restriction applies to this Agent alone, and it fails closed —
+      // a tool that is not in the allowlist (including one added later) is hidden.
+      dispose = agent.ctx.tools.restrict({ allow })
     } catch (error) {
       pendingSeries.delete(sessionId)
       return {
         kind: 'error',
-        text: `无法关闭联网工具（本部署可能没有注册 web_search / web_fetch）/ Could not turn the web tools off: ${messageOf(error)}`,
+        text: `无法断网 / Could not turn the network off: ${messageOf(error)}`,
       }
     }
     offSessions.set(sessionId, { agent, dispose })
