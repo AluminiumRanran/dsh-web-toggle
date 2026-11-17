@@ -12,7 +12,15 @@
 
 需要 DSH `>= 0.2.2-rc.1 < 0.3.0`。
 
-源码目录直接装（推荐，改代码后要同步）：
+从 npm 装（最省事）：
+
+```
+plugin_manager install_bundle target="dsh-web-toggle"
+```
+
+或指定版本 `target="dsh-web-toggle@0.1.1"`。也可以下 GitHub Release 里的 tgz，用 `target="file:/绝对路径/dsh-web-toggle-0.1.1.tgz"` 装，效果一样。
+
+开发时源码目录直接装（改代码后要同步）：
 
 ```
 plugin_manager install_bundle target="file:E:/workspace/dsh-web-toggle-prompt-20261116/dsh-web-toggle"

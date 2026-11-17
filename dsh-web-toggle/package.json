@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-toggle",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "按会话独立的联网开关：关掉后本会话的模型看不到 web_search / web_fetch、浏览器、MCP 等出网工具，shell 里的联网命令也会被拦下。Per-session web switch for DeepSeek Harness.",
   "type": "module",
   "exports": {
