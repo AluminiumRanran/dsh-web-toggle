@@ -15,14 +15,14 @@
 | `/webtoggle on` | 开 |
 | `/webtoggle status` | 只看当前状态，不改 |
 | `/webtoggle config` | 看面板配置与按模式的统计 |
-| `/webtoggle tools` | 列出内核当前全部工具 + 每个工具的模式 |
+| `/webtoggle tools` | 只回工具总数；`tools --json` 才附完整目录（客户端靠它画面板） |
 | `/webtoggle surface <settings\|composer> on\|off` | 开关某处面板（`plugin` 固定显示，见下） |
 | `/webtoggle mode <tool> keep\|hide\|inspect\|refuse [--global]` | 给某个工具定模式（默认本会话） |
 | `/webtoggle mode reset [--global]` | 这一层模式表交还上一层 |
 | `/webtoggle keep <tool> on\|off [--global]` | `mode` 的旧写法（`on` → keep，`off` → hide） |
 | `/webtoggle allow add\|remove <tool> [--global]` | 更早的写法，仍可用 |
 
-命令结果默认只回一句人话；`debug` 配置打开时才带机器可读标记：`[web:on]` / `[web:off]` 供按钮同步真实状态，`[web-state]{...}` 供面板画配置（开关、三个入口、两层模式表、能否写配置），`[web-tools]{...}` 是工具目录（每项含 `mode` / `builtIn`）。`tools` 是读命令，**永远**带这两段标记——面板打开时只发这一条，一次往返就能把开关和目录都画对，不会再往聊天里刷一串状态。
+命令结果默认只回一句人话；`debug` 配置打开时才带机器可读标记（`tools` 另有 `--json` 开关，见下）：`[web:on]` / `[web:off]` 供按钮同步真实状态，`[web-state]{...}` 供面板画配置（开关、三个入口、两层模式表、能否写配置），`[web-tools]{...}` 是工具目录（每项含 `mode` / `builtIn`）。`tools` 是读命令，**永远**带这两段标记——面板打开时只发这一条，一次往返就能把开关和目录都画对，不会再往聊天里刷一串状态。
 
 错误结果不附加任何机器标记（默认模式下），错误信息本身始终完整。
 
@@ -62,6 +62,7 @@
 
 - 入口开关是**真卸载**：关掉时把 `ctx.slots.register` 的 disposer 连同它的 `ctx.effect` 一起撤销，导航项与图标一起消失；重新打开时再注册回来。详情页那一处**永不卸载**——它是把另外两个入口重新打开的保底，命令层面 `surface plugin off` 只回一句说明。
 - 三个面板里都有「工具」区：列出全部工具、每行一个按钮，点一下在 `keep → hide → inspect → refuse → keep` 之间循环，发 `mode <name> <next>[ --global]`；按钮上写的就是当前模式，筛选框只做本地过滤。
+- 目录不进聊天：客户端把 `tools --json` 的结果存进 `localStorage`（键 `dsh-web-toggle:catalogue`），面板打开时直接画缓存，缓存缺失或用户点「刷新」时才真的发命令。三处面板的显示开关同样记在 `dsh-web-toggle:surfaces` 里，刷新页面后不会闪一下再消失。
 - 设置页与详情页拿不到 sessionId（owner props 只有 `close` / `subject`），所以它们执行命令时用「最后一个画过的会话」：模块级 `lastSessionId` → localStorage `dsh-web-toggle:last-session` → 客户端已知的第一个会话。命中不了就如实提示「先打开任意一个任务」。
 - 配置写入只走 `configEditor.edit(entry, current => …)`：拿不到编辑器时**如实报错**（`没有配置文件可写`、`writable: false`），绝不假装保存。
 - 配置字段都是 `.volatile()`：改值原地生效，不重启插件。写入用 `saves` promise 串行化，避免两次点击互相覆盖。

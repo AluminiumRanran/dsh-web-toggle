@@ -673,10 +673,15 @@ function makeConfigCtx(initial = {}) {
   assert.ok(!off.text.includes('[web-state]'), '开关回执不带 JSON')
   assert.equal(restrictions.length, 1, '限制照常下发')
 
-  // 读命令例外：面板靠它重建状态，而且只在打开面板时用一次。
-  const tools = await run(agent, 'tools')
-  assert.match(tools.text, /\[web-tools\]/, '目录仍然是机器可读的')
-  assert.match(tools.text, /\[web-state\]/, '读命令要带状态')
+  // 目录默认不写进聊天：只回一句数量，面板靠缓存画；要机器可读的那份得显式 --json。
+  const quietTools = await run(agent, 'tools')
+  assert.match(quietTools.text, /个可用工具/, '默认也要说清有多少个')
+  assert.ok(!quietTools.text.includes('[web-tools]'), '默认不带目录 JSON')
+  assert.ok(!quietTools.text.includes('[web-state]'), '默认不带状态 JSON')
+
+  const tools = await run(agent, 'tools --json')
+  assert.match(tools.text, /\[web-tools\]/, '--json 才附机器可读的目录')
+  assert.match(tools.text, /\[web-state\]/, '--json 时带状态')
   assert.equal(stateOf(tools.text).off, true)
   const rowOf = (name) => toolsOf(tools.text).tools.find((tool) => tool.name === name)
   assert.equal(rowOf('ops_bash').mode, 'inspect', 'shell 标成内容检查')

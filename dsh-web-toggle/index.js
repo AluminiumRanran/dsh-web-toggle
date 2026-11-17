@@ -973,13 +973,12 @@ export function apply(ctx, config) {
 
     if (verb === 'tools') {
       const catalogue = catalogueOf(agent)
-      return result(
-        agent,
-        'success',
-        `共 ${catalogue.tools.length} 个可用工具 / ${catalogue.tools.length} tool(s) in this catalogue`,
-        `[web-tools]${JSON.stringify(catalogue)}`,
-        true,
-      )
+      const summary = `共 ${catalogue.tools.length} 个可用工具 / ${catalogue.tools.length} tool(s) in this catalogue`
+      // 目录是给客户端画的，写进聊天就是几百个名字的噪音：默认只回一句，
+      // 面板显式带 --json（或打开 debug）时才附上机器可读的那一段。
+      const verbose = args.includes('--json') || conf('debug', false) === true
+      if (!verbose) return result(agent, 'success', summary)
+      return result(agent, 'success', summary, `[web-tools]${JSON.stringify(catalogue)}`, true)
     }
 
     if (verb === 'surface') {

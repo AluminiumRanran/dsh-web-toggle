@@ -530,7 +530,7 @@ function expand(node) {
   assert.equal(caret.props['aria-expanded'], 'false')
   caret.props.onClick()
   await settle()
-  assert.ok(lastCommand(host, '/webtoggle tools'), '打开时只取一次工具目录')
+  assert.ok(lastCommand(host, '/webtoggle tools --json'), '打开时只取一次工具目录')
   assert.ok(!host.state.calls.some((call) => call[1] === '/webtoggle status'), '打开面板不再多问一次状态')
   tree = render()
   tree = render()
@@ -628,7 +628,7 @@ function expand(node) {
   await settle()
   tree = render()
   tree = render()
-  assert.ok(lastCommand(host, '/webtoggle tools'), '页面挂载时只取一次目录')
+  assert.ok(lastCommand(host, '/webtoggle tools --json'), '页面挂载时只取一次目录')
   assert.ok(!host.state.calls.some((call) => call[1] === '/webtoggle status'), '页面挂载不再多问一次状态')
   const panels = queryAll(tree, 'dswt-panel')
   assert.equal(panels.length, 1)
@@ -646,18 +646,25 @@ function expand(node) {
   tree = render()
   assert.equal(tree, null, '关掉之后这个页面自己也不画了')
 
-  // 换个入口把它重新打开：输入框那边取一次状态，页面就跟着回来
+  // 换个入口把它重新打开：输入框面板底部的三行开关里点「显示」
   const reopened = fakeHost({ global: { ops_bash: 'keep' } })
   page.state.remote = reopened.remote
   const composerAgain = mount('s11')
-  const composerTree = composerAgain.render()
+  let composerTree = composerAgain.render()
   queryAll(composerTree, 'dswt-caret')[0].props.onClick()
   await settle()
+  composerTree = composerAgain.render()
+  composerTree = composerAgain.render()
+  const settingsRow = queryAll(composerTree, 'dswt-row').find((item) => textOf(item).includes(t('panel.surface.settings')))
+  assert.ok(settingsRow !== undefined, '输入框面板里也要有这一行')
+  buttonWith(settingsRow, t('panel.show')).props.onClick()
+  await settle()
+  assert.ok(lastCommand(reopened, '/webtoggle surface settings on'), '从别处把设置页装回来')
   const again = mountPage('settings.section')
   let pageTree = again.render()
   await settle()
   pageTree = again.render()
-  pageTree = again.render()
+  pageTree = pageTree
   assert.equal(queryAll(pageTree, 'dswt-panel').length, 1, '配置允许时应画回来')
 
   // 全局长名单：点一下 bash 就写进 globalTools（命令带 --global）
@@ -699,6 +706,8 @@ function expand(node) {
   // 之前用例里挂过 composer，模块级 lastSessionId 还在，所以这里应能正常画；
   // 断掉 remote 才轮到错误提示。
   page.state.remote = undefined
+  // 目录缓存会让页面直接画出来、根本不去连宿主；要测失败提示得先清掉它。
+  globalThis.localStorage.removeItem('dsh-web-toggle:catalogue')
   const broken = mountPage('settings.section')
   tree = broken.render()
   await settle()

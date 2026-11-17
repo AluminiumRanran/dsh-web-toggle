@@ -32,6 +32,8 @@ window.__ModuleLoader__.load({
     const STYLE_ID = 'dsh-web-toggle/styles'
     /** Browser-local per-Session state: `1` means the switch is off. */
     const STORAGE_PREFIX = 'dsh-web-toggle:off:'
+    /** Cache of the tool catalogue: the panel draws from it instead of asking每开一次。 */
+    const CATALOGUE_KEY = 'dsh-web-toggle:catalogue'
     /** Browser-local memory of the last Session drawn, so the global pages can run commands. */
     const LAST_SESSION_KEY = 'dsh-web-toggle:last-session'
     /**
@@ -46,6 +48,20 @@ window.__ModuleLoader__.load({
      * hidden surface has to leave no empty entry behind, not merely render nothing.
      */
     const liveSurfaces = { plugin: true, settings: true, composer: true }
+    /** Remembered surfaces, so a reload draws the same panels before any command runs. */
+    const SURFACES_KEY = 'dsh-web-toggle:surfaces'
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const stored = JSON.parse(localStorage.getItem(SURFACES_KEY) ?? 'null')
+        if (stored !== null && typeof stored === 'object') {
+          for (const key of Object.keys(liveSurfaces)) {
+            if (typeof stored[key] === 'boolean') liveSurfaces[key] = stored[key]
+          }
+        }
+      }
+    } catch (error) {
+      /* 存不下或读不出就用默认值：三个入口都显示 */
+    }
     /** Re-sync callbacks run whenever `liveSurfaces` changes. */
     const surfaceWatchers = new Set()
 
@@ -63,6 +79,11 @@ window.__ModuleLoader__.load({
         changed = true
       }
       if (!changed) return
+      try {
+        if (typeof localStorage !== 'undefined') localStorage.setItem(SURFACES_KEY, JSON.stringify(liveSurfaces))
+      } catch (error) {
+        /* 记不住就算了：这一次照样生效 */
+      }
       for (const watcher of [...surfaceWatchers]) {
         try {
           watcher()
@@ -121,6 +142,7 @@ window.__ModuleLoader__.load({
 .dswt-btn[data-mode="inspect"]{color:var(--dsw-alias-state-warning-primary,#e8590c)}
 .dswt-btn[data-mode="hide"]{opacity:.72}
 .dswt-btn[data-mode="refuse"]{color:var(--dswt-danger,#e03131)}
+.dswt-refresh{padding:2px 8px;font-size:11px;flex:none}
 .dswt-add{display:flex;gap:6px;align-items:center}
 .dswt-input{flex:1;min-width:0;height:26px;padding:0 7px;border-radius:6px;border:1px solid var(--dsw-alias-border-neutral,rgba(127,127,127,.35));background:var(--dsw-alias-bg-base,transparent);color:inherit;font:inherit}
 .dswt-input:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary))}
@@ -165,6 +187,8 @@ window.__ModuleLoader__.load({
         'panel.sessionTools': 'Tools in this task',
         'panel.globalTools': 'Tools for every task',
         'panel.filter': 'filter tools',
+        'panel.refresh': 'refresh',
+        'panel.refreshHint': 'Ask the host for the tool list again (one receipt shows up in the chat).',
         'panel.noTools': 'No tool matches this filter.',
         'panel.mode.keep': 'keep',
         'panel.mode.hide': 'hide',
@@ -224,6 +248,8 @@ window.__ModuleLoader__.load({
         'panel.sessionTools': '本任务的工具',
         'panel.globalTools': '所有任务的工具',
         'panel.filter': '筛选工具',
+        'panel.refresh': '刷新',
+        'panel.refreshHint': '重新向宿主读一次工具列表（聊天里会出现一条回执）。',
         'panel.noTools': '没有匹配的工具。',
         'panel.mode.keep': '放行',
         'panel.mode.hide': '拒绝',
@@ -316,6 +342,32 @@ window.__ModuleLoader__.load({
         return parsed
       } catch (error) {
         return undefined
+      }
+    }
+
+    /** Read the cached catalogue; undefined when never fetched or unavailable. */
+    const readCatalogueCache = () => {
+      try {
+        if (typeof localStorage === 'undefined') return undefined
+        const raw = localStorage.getItem(CATALOGUE_KEY)
+        if (raw === null) return undefined
+        const parsed = JSON.parse(raw)
+        if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.tools)) return undefined
+        if (parsed.tools.length === 0) return undefined
+        return parsed
+      } catch (error) {
+        return undefined
+      }
+    }
+
+    /** Remember the catalogue so the next panel open needs no command round-trip. */
+    const writeCatalogueCache = (catalogue) => {
+      try {
+        if (typeof localStorage === 'undefined') return
+        if (catalogue === undefined || !Array.isArray(catalogue.tools)) return
+        localStorage.setItem(CATALOGUE_KEY, JSON.stringify({ tools: catalogue.tools }))
+      } catch (error) {
+        // 存不下就算了：下一次打开就多问一次。
       }
     }
 
@@ -608,14 +660,31 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'dswt-section' },
             h('div', { className: 'dswt-section-title' }, global ? t('panel.globalTools') : t('panel.sessionTools')),
-            h('input', {
-              className: 'dswt-input',
-              value: filter,
-              placeholder: t('panel.filter'),
-              spellCheck: false,
-              disabled,
-              onChange: (event) => setFilter(event.target.value),
-            }),
+            h(
+              'div',
+              { className: 'dswt-add' },
+              h('input', {
+                className: 'dswt-input',
+                value: filter,
+                placeholder: t('panel.filter'),
+                spellCheck: false,
+                disabled,
+                onChange: (event) => setFilter(event.target.value),
+              }),
+              null === props.onRefresh || props.onRefresh === undefined
+                ? null
+                : h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dswt-btn dswt-refresh',
+                      disabled,
+                      title: t('panel.refreshHint'),
+                      onClick: () => props.onRefresh(),
+                    },
+                    t('panel.refresh'),
+                  ),
+            ),
             rows.length === 0
               ? h('div', { className: 'dswt-hint' }, t('panel.noTools'))
               : h(
@@ -905,14 +974,17 @@ window.__ModuleLoader__.load({
 
         /** Ask the Host for the catalogue and fold its state into the panel. */
         const loadCatalogue = async () => {
-          const outcome = await run(sessionId, 'tools', t)
+          const outcome = await run(sessionId, 'tools --json', t)
           if (!aliveRef.current) return outcome
           if (outcome.state !== undefined) {
             setPanel(outcome.state)
             publishSurfaces(outcome.state.surfaces)
           }
           const parsed = parseTools(outcome.text)
-          if (parsed !== undefined) setCatalogue(parsed.tools)
+          if (parsed !== undefined) {
+            setCatalogue(parsed.tools)
+            writeCatalogueCache(parsed)
+          }
           return outcome
         }
 
@@ -946,6 +1018,15 @@ window.__ModuleLoader__.load({
           return true
         }
 
+        /** Re-read the catalogue on demand: this is the one command that prints a receipt. */
+        const refreshCatalogue = () => {
+          if (sessionId === undefined) return
+          setPanelBusy(true)
+          void loadCatalogue().then(() => {
+            if (aliveRef.current) setPanelBusy(false)
+          })
+        }
+
         /** Open the popover, asking the Host for the state and the catalogue it draws. */
         const openPanel = () => {
           const next = !open
@@ -953,9 +1034,15 @@ window.__ModuleLoader__.load({
           if (!next) return
           setPanelError(null)
           if (panel !== null && catalogue.length > 0) return
+          // 目录里几百个名字，写进聊天只是噪音：缓存命中就只画缓存，不发命令。
+          const cached = readCatalogueCache()
+          if (cached !== undefined) {
+            setCatalogue(cached.tools)
+            return
+          }
           setPanelBusy(true)
-          // 一次 `tools` 就够：它的回执同时带状态和目录，比 status+tools 少一条聊天回执。
-          Promise.resolve(run(sessionId, 'tools', t)).then((tools) => {
+          // 一次 `tools --json` 就够：它的回执同时带状态和目录，比 status+tools 少一条聊天回执。
+          Promise.resolve(run(sessionId, 'tools --json', t)).then((tools) => {
             if (!aliveRef.current) return
             setPanelBusy(false)
             if (tools.state !== undefined) {
@@ -963,7 +1050,10 @@ window.__ModuleLoader__.load({
               publishSurfaces(tools.state.surfaces)
             }
             const parsed = parseTools(tools.text)
-            if (parsed !== undefined) setCatalogue(parsed.tools)
+            if (parsed !== undefined) {
+              setCatalogue(parsed.tools)
+              writeCatalogueCache(parsed)
+            }
             if (!tools.ok) setPanelError(tools.text)
           })
         }
@@ -1023,6 +1113,7 @@ window.__ModuleLoader__.load({
                   error: panelError,
                   note: panelNote,
                   onRun: panelRun,
+                  onRefresh: refreshCatalogue,
                 }),
               )
             : null,
@@ -1070,8 +1161,16 @@ window.__ModuleLoader__.load({
         // catalogue it draws.
         useEffect(() => {
           let cancelled = false
+          // 先画缓存：目录几百行，写进聊天就是噪音，默认不为它付一条回执。
+          const cached = readCatalogueCache()
+          if (cached !== undefined) {
+            setCatalogue(cached.tools)
+            return () => {
+              cancelled = true
+            }
+          }
           setBusy(true)
-          Promise.resolve(run('tools', t)).then((tools) => {
+          Promise.resolve(run('tools --json', t)).then((tools) => {
             if (cancelled || !aliveRef.current) return
             setBusy(false)
             if (tools.state !== undefined) {
@@ -1079,7 +1178,10 @@ window.__ModuleLoader__.load({
               publishSurfaces(tools.state.surfaces)
             }
             const parsed = parseTools(tools.text)
-            if (parsed !== undefined) setCatalogue(parsed.tools)
+            if (parsed !== undefined) {
+              setCatalogue(parsed.tools)
+              writeCatalogueCache(parsed)
+            }
             if (!tools.ok) setError(tools.text)
           })
           return () => {
@@ -1117,10 +1219,13 @@ window.__ModuleLoader__.load({
             setState((current) => (current === null ? current : { ...current, surfaces: { ...current.surfaces, [plan.key]: plan.value } }))
             publishSurfaces({ ...liveSurfaces, [plan.key]: plan.value })
           } else {
-            const tools = await run('tools', t)
+            const tools = await run('tools --json', t)
             if (!aliveRef.current) return false
             const parsed = parseTools(tools.text)
-            if (parsed !== undefined) setCatalogue(parsed.tools)
+            if (parsed !== undefined) {
+              setCatalogue(parsed.tools)
+              writeCatalogueCache(parsed)
+            }
             if (tools.state !== undefined) {
               setState(tools.state)
               publishSurfaces(tools.state.surfaces)
@@ -1129,6 +1234,25 @@ window.__ModuleLoader__.load({
           setBusy(false)
           setNote(t('panel.note.saved'))
           return true
+        }
+
+        /** 页面上的「刷新」：只有这一步会真的发命令、在聊天里留一条回执。 */
+        const refresh = () => {
+          setBusy(true)
+          void run('tools --json', t).then((tools) => {
+            if (!aliveRef.current) return
+            setBusy(false)
+            const parsed = parseTools(tools.text)
+            if (parsed !== undefined) {
+              setCatalogue(parsed.tools)
+              writeCatalogueCache(parsed)
+            }
+            if (tools.state !== undefined) {
+              setState(tools.state)
+              publishSurfaces(tools.state.surfaces)
+            }
+            if (!tools.ok) setError(tools.text)
+          })
         }
 
         // A hidden surface is unmounted by `apply`, never drawn: rendering nothing would
@@ -1143,6 +1267,7 @@ window.__ModuleLoader__.load({
           error,
           note,
           onRun,
+          onRefresh: refresh,
         })
       }
     }
